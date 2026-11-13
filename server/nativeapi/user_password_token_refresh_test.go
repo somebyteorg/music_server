@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"time"
 
 	"github.com/navidrome/navidrome/conf"
@@ -41,8 +40,7 @@ var _ = Describe("PUT /user/{id}: token refresh on self password change", func()
 		conf.Server.EnableUserEditing = true
 		conf.Server.EnableSharing = false
 		conf.Server.SessionTimeout = time.Hour
-		conf.Server.DbPath = filepath.Join(GinkgoT().TempDir(), "nativeapi-user-refresh.db") + "?_journal_mode=WAL"
-		DeferCleanup(db.Init(GinkgoT().Context()))
+		tests.InitDB(GinkgoT().Context())
 
 		ds = &tests.MockDataStore{RealDS: persistence.New(db.Db())}
 		auth.Init(ds)

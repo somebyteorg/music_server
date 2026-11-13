@@ -36,11 +36,11 @@ var _ = Describe("TagRepository", func() {
 		Expect(err).ToNot(HaveOccurred())
 
 		// Ensure library 1 exists (if it doesn't already)
-		_, err = db.NewQuery("INSERT OR IGNORE INTO library (id, name, path, default_new_users) VALUES (1, 'Test Library', '/test', true)").Execute()
+		_, err = db.NewQuery("INSERT INTO library (id, name, path, default_new_users) VALUES (1, 'Test Library', '/test', true) ON CONFLICT DO NOTHING").Execute()
 		Expect(err).ToNot(HaveOccurred())
 
 		// Ensure the admin user has access to library 1
-		_, err = db.NewQuery("INSERT OR IGNORE INTO user_library (user_id, library_id) VALUES ('userid', 1)").Execute()
+		_, err = db.NewQuery("INSERT INTO user_library (user_id, library_id) VALUES ('userid', 1) ON CONFLICT DO NOTHING").Execute()
 		Expect(err).ToNot(HaveOccurred())
 
 		// Add comprehensive test data that covers all test scenarios

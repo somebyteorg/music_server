@@ -8,12 +8,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/navidrome/navidrome/conf"
 	"github.com/navidrome/navidrome/conf/configtest"
+	"github.com/navidrome/navidrome/db"
 	"github.com/navidrome/navidrome/log"
 	"github.com/navidrome/navidrome/model"
 	"github.com/navidrome/navidrome/tests"
@@ -35,10 +35,11 @@ var (
 
 func TestPlugins(t *testing.T) {
 	tests.Init(t, false)
+	tests.InitDB(t.Context())
 
 	// Set globally so tests using configtest.SetupConfig inherit it. The cache
 	// persists between runs; entries are content-addressed, so a stale one only misses.
-	conf.Server.CacheFolder = conf.NewDir(filepath.Join(testDataDir, wazeroCacheDir))
+	conf.Server.CacheFolder = conf.NewDir(filepath.Join(os.TempDir(), "plugins-wazero-cache"))
 	conf.Server.Plugins.CacheSize = "1GB" // the default evicts the cache mid-run
 
 	log.SetLevel(log.LevelFatal)
@@ -115,6 +116,10 @@ func createTestManagerWithPluginsAndMetrics(pluginConfig map[string]map[string]s
 	mockPluginRepo := tests.CreateMockPluginRepo()
 	mockPluginRepo.Permitted = true
 	mockPluginRepo.SetData(enabledPlugins)
+	for _, enabled := range enabledPlugins {
+		_, err := db.Db().ExecContext(GinkgoT().Context(), `INSERT INTO plugin(id,path,manifest,config,users,libraries,sha256,created_at,updated_at) VALUES($1,'','{}','{}','[]','[]','',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP) ON CONFLICT(id) DO NOTHING`, enabled.ID)
+		Expect(err).ToNot(HaveOccurred())
+	}
 	dataStore := &tests.MockDataStore{MockedPlugin: mockPluginRepo}
 
 	// Create and start manager
@@ -135,16 +140,15 @@ func createTestManagerWithPluginsAndMetrics(pluginConfig map[string]map[string]s
 	return manager, tmpDir
 }
 
-var _ = SynchronizedBeforeSuite(func() {
-	// Build once: the testdata Makefile is not safe to run concurrently.
-	buildTestPlugins(testDataDir)
-}, func() {
-	// Get testdata directory (where test plugin .ndp packages live)
-	_, currentFile, _, ok := runtime.Caller(0)
-	Expect(ok).To(BeTrue())
-	testdataDir = filepath.Join(filepath.Dir(currentFile), "testdata")
-
-	// Create shared manager for most tests
+var _ = SynchronizedBeforeSuite(func() []byte {
+	root, err := os.MkdirTemp(os.TempDir(), "plugin-fixtures-*")
+	Expect(err).ToNot(HaveOccurred())
+	Expect(os.CopyFS(filepath.Join(root, "testdata"), os.DirFS(testDataDir))).To(Succeed())
+	Expect(os.CopyFS(filepath.Join(root, "pdk", "go"), os.DirFS("plugins/pdk/go"))).To(Succeed())
+	buildTestPlugins(filepath.Join(root, "testdata"))
+	return []byte(root)
+}, func(root []byte) {
+	testdataDir = filepath.Join(string(root), "testdata")
 	testManager, tmpPluginsDir = createTestManager(nil)
 })
 
@@ -161,3 +165,14 @@ var _ = AfterSuite(func() {
 type noopMetricsRecorder struct{}
 
 func (noopMetricsRecorder) RecordPluginRequest(context.Context, string, string, bool, int64) {}
+
+func setupPluginStorage(ctx context.Context) {
+	GinkgoHelper()
+	tests.InitDB(ctx)
+	for _, pluginID := range []string{"test_plugin", "other_plugin", "test_close_race"} {
+		_, err := db.Db().ExecContext(ctx, "DELETE FROM plugin WHERE id=$1", pluginID)
+		Expect(err).ToNot(HaveOccurred())
+		_, err = db.Db().ExecContext(ctx, `INSERT INTO plugin(id,path,manifest,config,users,libraries,sha256,created_at,updated_at) VALUES($1,'','{}','{}','[]','[]','',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, pluginID)
+		Expect(err).ToNot(HaveOccurred())
+	}
+}

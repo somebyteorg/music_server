@@ -98,12 +98,10 @@ func (r *playlistTrackRepository) Count(ctx context.Context, options ...rest.Que
 func (r *playlistTrackRepository) Read(ctx context.Context, id string) (*model.PlaylistTrack, error) {
 	userID := loggedUser(ctx).ID
 	sel := r.newSelect(ctx).
-		LeftJoin("annotation on ("+
-			"annotation.item_id = media_file_id"+
-			" AND annotation.item_type = 'media_file'"+
-			" AND annotation.user_id = '"+userID+"')").
+		LeftJoin("annotation on (annotation.item_id = media_file_id"+
+			" AND annotation.item_type = 'media_file' AND annotation.user_id = ?)", userID).
 		Columns(
-			"coalesce(starred, 0) as starred",
+			"coalesce(starred, false) as starred",
 			"coalesce(play_count, 0) as play_count",
 			"coalesce(rating, 0) as rating",
 			"starred_at",
@@ -130,7 +128,7 @@ func (r *playlistTrackRepository) GetAll(ctx context.Context, options ...model.Q
 
 func (r *playlistTrackRepository) GetCursor(ctx context.Context, options ...model.QueryOptions) (model.PlaylistTrackCursor, error) {
 	sel := r.playlistRepo.tracksQuery(ctx, r.newSelect(ctx, options...), r.playlistId)
-	cursor, err := queryWithStableResults[dbPlaylistTrack](ctx, r.sqlRepository, sel)
+	cursor, err := queryCursor[dbPlaylistTrack](ctx, r.sqlRepository, sel)
 	if err != nil {
 		return nil, err
 	}
@@ -148,6 +146,7 @@ func (r *playlistTrackRepository) GetMediaFileIDs(ctx context.Context, options .
 		Join("media_file f on f.id = media_file_id").
 		Where(Eq{"playlist_id": r.playlistId})
 	query = r.applyLibraryFilter(ctx, query, "f")
+	query = query.OrderBy("playlist_tracks.id")
 	var ids []string
 	if err := r.queryAllSlice(ctx, query, &ids); err != nil {
 		return nil, err
@@ -156,10 +155,16 @@ func (r *playlistTrackRepository) GetMediaFileIDs(ctx context.Context, options .
 }
 
 func (r *playlistTrackRepository) GetAlbumIDs(ctx context.Context, options ...model.QueryOptions) ([]string, error) {
-	query := r.newSelect(ctx, options...).Columns("distinct mf.album_id").
+	albums := r.newSelect(ctx).Columns("DISTINCT mf.album_id AS id").
 		Join("media_file mf on mf.id = media_file_id").
 		Where(Eq{"playlist_id": r.playlistId})
-	query = r.applyLibraryFilter(ctx, query, "mf")
+	albums = r.applyLibraryFilter(ctx, r.applyFilters(albums, options...), "mf")
+	// Deduplicate before sampling: PostgreSQL requires every DISTINCT sort
+	// expression in the projection, and random() would make every row distinct.
+	scoped := r.sqlRepository
+	scoped.tableName = "playlist_albums"
+	scoped.sortMappings = map[string]string{"id": "id", "random": "random()"}
+	query := scoped.applyOptions(Select("id").FromSelect(albums, scoped.tableName), options...)
 	var ids []string
 	err := r.queryAllSlice(ctx, query, &ids)
 	if err != nil {
@@ -172,7 +177,7 @@ func (r *playlistTrackRepository) ReadAll(ctx context.Context, options ...rest.Q
 	return r.GetAll(ctx, r.parseRestOptions(ctx, options...))
 }
 
-func (r *playlistTrackRepository) Add(ctx context.Context, mediaFileIds []string) (int, error) {
+func (r *playlistTrackRepository) add(ctx context.Context, mediaFileIds []string) (int, error) {
 	if len(mediaFileIds) > 0 {
 		log.Debug(ctx, "Adding songs to playlist", "playlistId", r.playlistId, "mediaFileIds", mediaFileIds)
 	} else {
@@ -191,7 +196,7 @@ func (r *playlistTrackRepository) Add(ctx context.Context, mediaFileIds []string
 
 // Insert adds tracks before the 1-based position pos, shifting the following entries down; a
 // position past the end appends. Callers must run it in a transaction.
-func (r *playlistTrackRepository) Insert(ctx context.Context, mediaFileIds []string, pos int) (int, error) {
+func (r *playlistTrackRepository) insert(ctx context.Context, mediaFileIds []string, pos int) (int, error) {
 	if len(mediaFileIds) == 0 {
 		return 0, nil
 	}
@@ -250,10 +255,10 @@ func (r *playlistTrackRepository) AddDiscs(ctx context.Context, discs []model.Di
 	return r.addMediaFileIds(ctx, clauses)
 }
 
-// deleteChunkSize keeps each DELETE under SQLITE_MAX_VARIABLE_NUMBER, matching addTracks.
+// deleteChunkSize bounds each DELETE, matching addTracks.
 const deleteChunkSize = 200
 
-func (r *playlistTrackRepository) Delete(ctx context.Context, ids ...string) error {
+func (r *playlistTrackRepository) deleteTracks(ctx context.Context, ids ...string) error {
 	for chunk := range slices.Chunk(ids, deleteChunkSize) {
 		if err := r.delete(ctx, And{Eq{"playlist_id": r.playlistId}, Eq{"id": chunk}}); err != nil {
 			return err
@@ -263,7 +268,7 @@ func (r *playlistTrackRepository) Delete(ctx context.Context, ids ...string) err
 	return r.playlistRepo.renumber(ctx, r.playlistId)
 }
 
-func (r *playlistTrackRepository) DeleteAll(ctx context.Context) error {
+func (r *playlistTrackRepository) deleteAllTracks(ctx context.Context) error {
 	err := r.delete(ctx, Eq{"playlist_id": r.playlistId})
 	if err != nil {
 		return err
@@ -274,7 +279,7 @@ func (r *playlistTrackRepository) DeleteAll(ctx context.Context) error {
 
 // Reorder moves a track from pos to newPos, shifting other tracks accordingly. newPos is clamped
 // to the playlist; a pos outside it is ErrNotFound, since shifting around it would leave a gap.
-func (r *playlistTrackRepository) Reorder(ctx context.Context, pos int, newPos int) error {
+func (r *playlistTrackRepository) reorder(ctx context.Context, pos int, newPos int) error {
 	var res struct{ Max sql.NullInt32 }
 	if err := r.queryOne(ctx, r.newSelect(ctx).Columns("max(id) as max").Where(Eq{"playlist_id": r.playlistId}), &res); err != nil {
 		return err

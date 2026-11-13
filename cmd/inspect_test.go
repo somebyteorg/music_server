@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/navidrome/navidrome/conf"
 	"github.com/navidrome/navidrome/conf/configtest"
 	"github.com/navidrome/navidrome/model"
 	. "github.com/onsi/ginkgo/v2"
@@ -52,7 +51,6 @@ var _ = Describe("inspect", func() {
 
 		It("does not create a database when there is none", func() {
 			dbFile := filepath.Join(GinkgoT().TempDir(), "navidrome.db")
-			conf.Server.DbPath = dbFile + "?_journal_mode=WAL"
 
 			Expect(loadLibraries(GinkgoT().Context())).To(BeNil())
 			Expect(dbFile).ToNot(BeAnExistingFile())

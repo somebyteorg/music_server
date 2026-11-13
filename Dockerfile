@@ -70,7 +70,7 @@ RUN --mount=type=bind,source=. \
     xx-go --wrap
     export CGO_ENABLED=1
     BUILD_TAGS=$(./release/build-tags.sh)
-    # -latomic is required on 32-bit arm (arm/v6, arm/v7) so SQLite's 64-bit atomics resolve.
+    # -latomic is required on 32-bit arm (arm/v6, arm/v7) for dependencies that use 64-bit atomics.
     go build -tags="${BUILD_TAGS}" -ldflags="-w -s \
         -linkmode=external -extldflags '-latomic' \
         -X github.com/navidrome/navidrome/consts.gitSha=${GIT_SHA} \
@@ -187,7 +187,7 @@ LABEL org.opencontainers.image.source="https://github.com/navidrome/navidrome"
 # - libwebp + symlinks: enables native WebP encoding via purego/dlopen
 # The mesa/LLVM stack mpv pulls in for video output is dropped in this same layer,
 # otherwise the deleted bytes still ship in the image.
-RUN apk add -U --no-cache curl ffmpeg mpv sqlite libwebp libwebpdemux libwebpmux && \
+RUN apk add -U --no-cache curl ffmpeg mpv postgresql-client libwebp libwebpdemux libwebpmux && \
     for lib in libwebp libwebpdemux libwebpmux; do \
         target=$(ls /usr/lib/$lib.so.* 2>/dev/null | head -1) && \
         [ -n "$target" ] && ln -sf "$target" /usr/lib/$lib.so; \

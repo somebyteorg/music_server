@@ -14,6 +14,7 @@ import (
 	"github.com/Masterminds/squirrel"
 	"github.com/deluan/rest"
 	"github.com/navidrome/navidrome/core/storage"
+	"github.com/navidrome/navidrome/db"
 	"github.com/navidrome/navidrome/log"
 	"github.com/navidrome/navidrome/model"
 	"github.com/navidrome/navidrome/model/metadata"
@@ -255,7 +256,7 @@ func (r *libraryRepositoryWrapper) deleteOne(ctx context.Context, id string) err
 
 	// Run the deletion in a transaction so the cascade delete and the orphaned-artist
 	// reconciliation it triggers (see libraryRepository.Delete) commit atomically.
-	err = r.ds.WithTx(func(tx model.DataStore) error {
+	err = r.ds.WithTx(ctx, func(tx model.DataStore) error {
 		return tx.Library().Delete(ctx, libID)
 	}, "delete library")
 	if err != nil {
@@ -294,15 +295,11 @@ func (r *libraryRepositoryWrapper) mapError(err error) error {
 		return nil
 	}
 
-	errStr := err.Error()
-
-	// Handle database constraint violations.
-	// TODO: Being tied to react-admin translations is not ideal, but this will probably go away with the new UI/API
-	if strings.Contains(errStr, "UNIQUE constraint failed") {
-		if strings.Contains(errStr, "library.name") {
+	if db.IsUniqueViolation(err) {
+		switch db.ConstraintName(err) {
+		case "library_name_key":
 			return &rest.ValidationError{Errors: map[string]string{"name": "ra.validation.unique"}}
-		}
-		if strings.Contains(errStr, "library.path") {
+		case "library_path_key":
 			return &rest.ValidationError{Errors: map[string]string{"path": "ra.validation.unique"}}
 		}
 	}

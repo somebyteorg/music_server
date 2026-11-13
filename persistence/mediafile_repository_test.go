@@ -189,15 +189,15 @@ var _ = Describe("MediaRepository", func() {
 			Filters: squirrel.And{
 				squirrel.Eq{"title": "Antenna"},
 				squirrel.Or{
-					Exists("json_tree(participants, '$.albumartist')", squirrel.Eq{"value": "Kraftwerk"}),
-					Exists("json_tree(participants, '$.artist')", squirrel.Eq{"value": "Kraftwerk"}),
+					Exists("media_file_artists mfa JOIN artist a ON a.id=mfa.artist_id", squirrel.And{squirrel.Expr("mfa.media_file_id=media_file.id"), squirrel.Eq{"mfa.role": "albumartist", "a.name": "Kraftwerk"}}),
+					Exists("media_file_artists mfa JOIN artist a ON a.id=mfa.artist_id", squirrel.And{squirrel.Expr("mfa.media_file_id=media_file.id"), squirrel.Eq{"mfa.role": "artist", "a.name": "Kraftwerk"}}),
 				},
 			},
 		})
 
 		Expect(err).To(BeNil())
 		Expect(results).To(HaveLen(3))
-		Expect(results[0].Lyrics).To(Equal(`[{"lang":"xxx","line":[{"value":"This is a set of lyrics"}],"synced":false}]`))
+		Expect(results[0].Lyrics).To(MatchJSON(`[{"lang":"xxx","line":[{"value":"This is a set of lyrics"}],"synced":false}]`))
 		for _, item := range results[1:] {
 			Expect(item.Lyrics).To(Equal("[]"))
 			Expect(item.Title).To(Equal("Antenna"))
@@ -1070,27 +1070,26 @@ var _ = Describe("MediaRepository", func() {
 			Expect(results[0].ID).To(Equal("findpath-1"))
 		})
 
-		It("finds files case-insensitively for ASCII characters (NOCASE)", func() {
-			// SQLite's COLLATE NOCASE handles ASCII case-insensitivity
+		It("finds files case-insensitively for ASCII characters", func() {
+			// Path matching uses PostgreSQL Unicode-aware lower().
 			results, err := mr.FindByPaths(ctx, []string{"1:ARTIST/ALBUM/TRACK.MP3"})
 			Expect(err).ToNot(HaveOccurred())
 			Expect(results).To(HaveLen(1))
 			Expect(results[0].ID).To(Equal("findpath-1"))
 		})
 
-		It("finds fullwidth characters only with exact case match (SQLite NOCASE limitation)", func() {
-			// SQLite's NOCASE does NOT handle fullwidth uppercase/lowercase equivalence
+		It("finds fullwidth characters regardless of case", func() {
 			// The DB has fullwidth uppercase ＡＣＲＯＳＳ, searching with exact match should work
 			results, err := mr.FindByPaths(ctx, []string{"1:plex/02 - ＡＣＲＯＳＳ.flac"})
 			Expect(err).ToNot(HaveOccurred())
 			Expect(results).To(HaveLen(1))
 			Expect(results[0].ID).To(Equal("findpath-3"))
 
-			// Searching with fullwidth lowercase ａｃｒｏｓｓ should NOT match
-			// (this is the SQLite limitation that requires exact matching for non-ASCII)
+			// PostgreSQL also matches the lowercase fullwidth path.
 			results, err = mr.FindByPaths(ctx, []string{"1:plex/02 - ａｃｒｏｓｓ.flac"})
 			Expect(err).ToNot(HaveOccurred())
-			Expect(results).To(BeEmpty())
+			Expect(results).To(HaveLen(1))
+			Expect(results[0].ID).To(Equal("findpath-3"))
 		})
 
 		It("returns multiple files when querying multiple paths", func() {

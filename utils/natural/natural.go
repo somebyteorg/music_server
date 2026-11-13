@@ -13,14 +13,12 @@ import "strings"
 // comparison continues with the remaining suffixes, and the padding
 // difference is kept as a final tie-breaker that only decides strings
 // that are otherwise equal (e.g. "a01" < "a1", "a0" < "a00"). Deferring
-// it that way is what keeps the ordering transitive, which SQLite
-// requires of a collating function.
+// it that way is what keeps the ordering transitive, as required for a valid ordering.
 func Compare(a, b string) int {
 	return compare(a, b, false)
 }
 
-// CompareFold is Compare with ASCII case folding, matching SQLite's NOCASE
-// collation: only A-Z fold, bytes >= 0x80 are compared as-is.
+// CompareFold is Compare with ASCII case folding, only folding A-Z; bytes >= 0x80 are compared as-is.
 func CompareFold(a, b string) int {
 	return compare(a, b, true)
 }

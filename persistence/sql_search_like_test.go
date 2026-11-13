@@ -27,15 +27,15 @@ var _ = Describe("legacySearchExpr", func() {
 		Expect(legacySearchExpr("media_file", "")).To(BeNil())
 	})
 
-	It("generates LIKE filter for single word", func() {
+	It("generates ILIKE filter for single word", func() {
 		expr := legacySearchExpr("media_file", "beatles")
 		sql, args, err := expr.ToSql()
 		Expect(err).ToNot(HaveOccurred())
-		Expect(sql).To(ContainSubstring("media_file.full_text LIKE"))
+		Expect(sql).To(ContainSubstring("media_file.full_text ILIKE"))
 		Expect(args).To(ContainElement("% beatles%"))
 	})
 
-	It("generates AND of LIKE filters for multiple words", func() {
+	It("generates AND of ILIKE filters for multiple words", func() {
 		expr := legacySearchExpr("media_file", "abbey road")
 		sql, args, err := expr.ToSql()
 		Expect(err).ToNot(HaveOccurred())
@@ -53,16 +53,16 @@ var _ = Describe("likeSearchExpr", func() {
 		Expect(likeSearchExpr("media_file", "   ")).To(BeNil())
 	})
 
-	It("generates LIKE filters against core columns for single CJK word", func() {
+	It("generates ILIKE filters against core columns for single CJK word", func() {
 		expr := likeSearchExpr("media_file", "周杰伦")
 		sql, args, err := expr.ToSql()
 		Expect(err).ToNot(HaveOccurred())
 		// Should have OR between columns for the single word
 		Expect(sql).To(ContainSubstring("OR"))
-		Expect(sql).To(ContainSubstring("media_file.title LIKE"))
-		Expect(sql).To(ContainSubstring("media_file.album LIKE"))
-		Expect(sql).To(ContainSubstring("media_file.artist LIKE"))
-		Expect(sql).To(ContainSubstring("media_file.album_artist LIKE"))
+		Expect(sql).To(ContainSubstring("media_file.title ILIKE"))
+		Expect(sql).To(ContainSubstring("media_file.album ILIKE"))
+		Expect(sql).To(ContainSubstring("media_file.artist ILIKE"))
+		Expect(sql).To(ContainSubstring("media_file.album_artist ILIKE"))
 		Expect(args).To(HaveLen(4))
 		for _, arg := range args {
 			Expect(arg).To(Equal("%周杰伦%"))
@@ -82,8 +82,8 @@ var _ = Describe("likeSearchExpr", func() {
 		expr := likeSearchExpr("album", "周杰伦")
 		sql, args, err := expr.ToSql()
 		Expect(err).ToNot(HaveOccurred())
-		Expect(sql).To(ContainSubstring("album.name LIKE"))
-		Expect(sql).To(ContainSubstring("album.album_artist LIKE"))
+		Expect(sql).To(ContainSubstring("album.name ILIKE"))
+		Expect(sql).To(ContainSubstring("album.album_artist ILIKE"))
 		Expect(args).To(HaveLen(2))
 	})
 
@@ -91,7 +91,7 @@ var _ = Describe("likeSearchExpr", func() {
 		expr := likeSearchExpr("artist", "周杰伦")
 		sql, args, err := expr.ToSql()
 		Expect(err).ToNot(HaveOccurred())
-		Expect(sql).To(ContainSubstring("artist.name LIKE"))
+		Expect(sql).To(ContainSubstring("artist.name ILIKE"))
 		Expect(args).To(HaveLen(1))
 	})
 
@@ -113,7 +113,7 @@ var _ = Describe("Legacy Integration Search", func() {
 		mr = NewMediaFileRepository(conn)
 	})
 
-	It("returns results using legacy LIKE-based search", func() {
+	It("returns results using legacy ILIKE-based search", func() {
 		results, err := mr.Search(ctx, "Radioactivity", model.QueryOptions{Max: 10})
 		Expect(err).ToNot(HaveOccurred())
 		Expect(results).To(HaveLen(1))

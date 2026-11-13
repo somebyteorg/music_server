@@ -805,11 +805,7 @@ func (api *Router) listAlbums(ctx context.Context, opts model.QueryOptions, q it
 	if len(q.studioIds) > 0 {
 		filters = append(filters, filter.ByStudioID(q.studioIds))
 	}
-	// Not on the search path: its first FTS phase selects rowids with no annotation join, so a
-	// starred/play_count predicate there is "no such column" rather than a filter.
-	if q.search == "" {
-		filters = append(filters, q.filters.predicates()...)
-	}
+	filters = append(filters, q.filters.predicates()...)
 	opts.Filters = filters
 	opts = filter.ApplyLibraryFilter(opts, q.scopeIDs)
 
@@ -854,11 +850,7 @@ func (api *Router) listSongs(ctx context.Context, opts model.QueryOptions, q ite
 	if len(q.studioIds) > 0 {
 		filters = append(filters, filter.ByStudioID(q.studioIds))
 	}
-	// Not on the search path: its first FTS phase selects rowids with no annotation join, so a
-	// starred/play_count predicate there is "no such column" rather than a filter.
-	if q.search == "" {
-		filters = append(filters, q.filters.predicates()...)
-	}
+	filters = append(filters, q.filters.predicates()...)
 	opts.Filters = filters
 	opts = filter.ApplyLibraryFilter(opts, q.scopeIDs)
 
@@ -997,7 +989,7 @@ func (api *Router) resolveItemByID(ctx context.Context, id string, fields dto.Fi
 // songsByIDs fetches the media files among ids with chunked IN queries instead of a Get per id.
 func (api *Router) songsByIDs(ctx context.Context, ids []string) map[string]model.MediaFile {
 	songs := make(map[string]model.MediaFile, len(ids))
-	// Chunked to stay under SQLITE_MAX_VARIABLE_NUMBER, like playqueue's loadTracks.
+	// Bound query size and artwork hydration for large requests.
 	for chunk := range slice.CollectChunks(slices.Values(ids), 500) {
 		mfs, err := api.ds.MediaFile().GetAll(ctx, model.QueryOptions{Filters: squirrel.Eq{"media_file.id": chunk}})
 		if err != nil {

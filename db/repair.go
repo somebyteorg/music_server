@@ -3,365 +3,145 @@ package db
 import (
 	"context"
 	"database/sql"
-	"errors"
+	"encoding/json"
 	"fmt"
-	"slices"
 	"strings"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/navidrome/navidrome/conf"
 )
 
-var ftsTables = []string{"media_file_fts", "album_fts", "artist_fts"}
-
-var ftsTriggerSuffixes = []string{"_ai", "_ad", "_au"}
-
-// integrityCheckMaxIssues bounds the problems reported; IntegrityCheck asks the
-// pragma for one extra row, because it truncates without emitting any marker.
-const integrityCheckMaxIssues = 100
-
-// IntegrityCheck runs PRAGMA integrity_check and returns the problems it reports, or
-// an empty slice when healthy. The second value marks a list that was cut short.
+// IntegrityCheck inspects PostgreSQL index validity. Physical page checks belong
+// to PostgreSQL's amcheck tooling and are not inferred from this catalog check.
 func IntegrityCheck(ctx context.Context, database *sql.DB) ([]string, bool, error) {
-	rows, err := database.QueryContext(ctx,
-		fmt.Sprintf("PRAGMA integrity_check(%d)", integrityCheckMaxIssues+1))
+	rows, err := database.QueryContext(ctx, `SELECT indexrelid::regclass::text FROM pg_index i
+        JOIN pg_class c ON c.oid=i.indexrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname=$1 AND NOT i.indisvalid`, conf.Server.DatabaseSchema)
 	if err != nil {
-		return nil, false, fmt.Errorf("running integrity_check: %w", err)
+		return nil, false, err
 	}
 	defer rows.Close()
-
 	var issues []string
 	for rows.Next() {
-		var line string
-		if err := rows.Scan(&line); err != nil {
-			return nil, false, fmt.Errorf("reading integrity_check results: %w", err)
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, false, err
 		}
-		issues = append(issues, line)
+		issues = append(issues, "Invalid index: "+name)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, false, fmt.Errorf("reading integrity_check results: %w", err)
-	}
-	if len(issues) == 1 && issues[0] == "ok" {
-		return nil, false, nil
-	}
-	if len(issues) > integrityCheckMaxIssues {
-		return issues[:integrityCheckMaxIssues], true, nil
-	}
-	return issues, false, nil
+	return issues, false, rows.Err()
 }
 
-// FKViolation counts the rows in Table that reference missing rows in Parent.
 type FKViolation struct {
-	Table  string
-	Parent string
-	Count  int64
+	Table, Parent string
+	Count         int64
 }
 
-// ForeignKeyCheck runs PRAGMA foreign_key_check, aggregated per (table, parent) pair
-// because the raw pragma emits one row per orphan, unbounded on a large library.
 func ForeignKeyCheck(ctx context.Context, database *sql.DB) ([]FKViolation, error) {
-	rows, err := database.QueryContext(ctx,
-		`SELECT "table", "parent", count(*) FROM pragma_foreign_key_check GROUP BY "table", "parent"`)
+	rows, err := database.QueryContext(ctx, `SELECT child.relname,pns.nspname,parent.relname,
+        array_to_json(ARRAY(SELECT a.attname FROM unnest(c.conkey) WITH ORDINALITY k(num,pos)
+            JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=k.num ORDER BY k.pos))::text,
+        array_to_json(ARRAY(SELECT a.attname FROM unnest(c.confkey) WITH ORDINALITY k(num,pos)
+            JOIN pg_attribute a ON a.attrelid=c.confrelid AND a.attnum=k.num ORDER BY k.pos))::text
+        FROM pg_constraint c JOIN pg_class child ON child.oid=c.conrelid
+        JOIN pg_namespace ns ON ns.oid=child.relnamespace JOIN pg_class parent ON parent.oid=c.confrelid
+        JOIN pg_namespace pns ON pns.oid=parent.relnamespace WHERE c.contype='f' AND ns.nspname=$1`, conf.Server.DatabaseSchema)
 	if err != nil {
-		return nil, fmt.Errorf("running foreign_key_check: %w", err)
+		return nil, err
 	}
-	defer rows.Close()
-
-	var violations []FKViolation
+	type relation struct{ table, parentSchema, parent, columns, parentColumns string }
+	var relations []relation
 	for rows.Next() {
-		var v FKViolation
-		if err := rows.Scan(&v.Table, &v.Parent, &v.Count); err != nil {
-			return nil, fmt.Errorf("reading foreign_key_check results: %w", err)
+		var rel relation
+		if err := rows.Scan(&rel.table, &rel.parentSchema, &rel.parent, &rel.columns, &rel.parentColumns); err != nil {
+			rows.Close()
+			return nil, err
 		}
-		violations = append(violations, v)
+		relations = append(relations, rel)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("reading foreign_key_check results: %w", err)
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	var violations []FKViolation
+	for _, rel := range relations {
+		var columns, parentColumns []string
+		if err := json.Unmarshal([]byte(rel.columns), &columns); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(rel.parentColumns), &parentColumns); err != nil {
+			return nil, err
+		}
+		var present, matches []string
+		for i, column := range columns {
+			source := "child." + pgx.Identifier{column}.Sanitize()
+			present = append(present, source+" IS NOT NULL")
+			matches = append(matches, "parent."+pgx.Identifier{parentColumns[i]}.Sanitize()+" = "+source)
+		}
+		query := "SELECT count(*) FROM " + pgx.Identifier{conf.Server.DatabaseSchema, rel.table}.Sanitize() + " child WHERE " + strings.Join(present, " AND ") + " AND NOT EXISTS (SELECT 1 FROM " + pgx.Identifier{rel.parentSchema, rel.parent}.Sanitize() + " parent WHERE " + strings.Join(matches, " AND ") + ")"
+		var count int64
+		if err := database.QueryRowContext(ctx, query).Scan(&count); err != nil {
+			return nil, err
+		}
+		if count > 0 {
+			violations = append(violations, FKViolation{Table: rel.table, Parent: rel.parent, Count: count})
+		}
 	}
 	return violations, nil
 }
 
-// IsFTSCorruptionOnly reports whether every integrity issue refers to one of the
-// FTS5 search tables, meaning RebuildFTS can fully repair the database.
 func IsFTSCorruptionOnly(issues []string) bool {
 	if len(issues) == 0 {
 		return false
 	}
-	for _, line := range issues {
-		if !slices.ContainsFunc(ftsTables, func(table string) bool { return strings.Contains(line, table) }) {
+	for _, issue := range issues {
+		if !strings.Contains(issue, "_search_") && !strings.Contains(issue, "_trgm_idx") {
 			return false
 		}
 	}
 	return true
 }
 
-// execer is the subset of *sql.DB and *sql.Tx that verifyFTS needs.
-type execer interface {
-	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
-}
-
-// VerifyFTS runs the FTS5 'integrity-check' command on each search table. Unlike a
-// full PRAGMA integrity_check, it reads only the FTS indexes, not the whole database.
 func VerifyFTS(ctx context.Context, database *sql.DB) error {
-	return verifyFTS(ctx, database)
-}
-
-func verifyFTS(ctx context.Context, database execer) error {
-	for _, table := range ftsTables {
-		stmt := fmt.Sprintf("INSERT INTO %[1]s(%[1]s) VALUES('integrity-check')", table) //nolint:gosec // fixed table list
-		if _, err := database.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("verifying %s: %w", table, err)
+	for _, table := range []string{"artist", "album", "media_file"} {
+		var valid bool
+		err := database.QueryRowContext(ctx, `SELECT i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid
+            JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND c.relname=$2`, conf.Server.DatabaseSchema, table+"_search_document_idx").Scan(&valid)
+		if err != nil {
+			return err
+		}
+		if !valid {
+			return fmt.Errorf("invalid search index for %s", table)
 		}
 	}
 	return nil
 }
 
-const ftsSearchMigration int64 = 20260220173400
-
-var errNotMigrated = errors.New("the FTS search migration has not been applied yet; start Navidrome once to migrate the database first")
-
-// requireFTSMigration fails unless the FTS search migration has run. The goose table
-// is probed separately because a query against a missing table fails at prepare time.
-func requireFTSMigration(ctx context.Context, database *sql.DB) error {
-	migrated, err := hasGooseTable(ctx, database)
-	if err != nil {
-		return fmt.Errorf("checking FTS migration status: %w", err)
-	}
-	if !migrated {
-		return errNotMigrated
-	}
-	var applied int
-	if err := database.QueryRowContext(ctx,
-		"SELECT count(*) FROM goose_db_version WHERE version_id = ?", ftsSearchMigration).Scan(&applied); err != nil {
-		return fmt.Errorf("checking FTS migration status: %w", err)
-	}
-	if applied == 0 {
-		return errNotMigrated
-	}
-	return nil
-}
-
-// RebuildFTS drops the FTS5 search tables and their triggers, recreates them from the
-// base tables, and verifies the result before committing. The tables are contentless,
-// so no user data is lost. It needs only the FTS migration, not a fully migrated
-// schema, because a corrupted DB often cannot run pending migrations.
 func RebuildFTS(ctx context.Context, database *sql.DB) error {
-	if err := requireFTSMigration(ctx, database); err != nil {
+	rows, err := database.QueryContext(ctx, `SELECT indexname FROM pg_indexes WHERE schemaname=$1
+        AND (indexname LIKE '%_search_%' OR indexname LIKE '%_trgm_idx') ORDER BY indexname`, conf.Server.DatabaseSchema)
+	if err != nil {
 		return err
 	}
-
-	tx, err := database.BeginTx(ctx, nil)
+	var indexes []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			return err
+		}
+		indexes = append(indexes, name)
+	}
+	err = rows.Err()
+	rows.Close()
 	if err != nil {
-		return fmt.Errorf("starting FTS rebuild transaction: %w", err)
+		return err
 	}
-	defer func() { _ = tx.Rollback() }()
-
-	var stmts []string
-	for _, table := range ftsTables {
-		for _, suffix := range ftsTriggerSuffixes {
-			stmts = append(stmts, "DROP TRIGGER IF EXISTS "+table+suffix)
-		}
-		stmts = append(stmts, "DROP TABLE IF EXISTS "+table)
-	}
-	stmts = append(stmts, ftsSchemaDDL...)
-	for _, stmt := range stmts {
-		if _, err := tx.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("rebuilding FTS schema: %w", err)
+	for _, name := range indexes {
+		if _, err := database.ExecContext(ctx, "REINDEX INDEX "+pgx.Identifier{conf.Server.DatabaseSchema, name}.Sanitize()); err != nil {
+			return err
 		}
 	}
-	if err := verifyFTS(ctx, tx); err != nil {
-		return fmt.Errorf("the rebuilt search index did not verify: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("committing FTS rebuild: %w", err)
-	}
-	return nil
-}
-
-// ftsSchemaDDL must reproduce what the full migration chain produces, not what any
-// single migration does; the schema comparison in repair_test.go guards the drift.
-var ftsSchemaDDL = []string{
-	`
-		CREATE VIRTUAL TABLE IF NOT EXISTS media_file_fts USING fts5(
-			title, album, artist, album_artist,
-			sort_title, sort_album_name, sort_artist_name, sort_album_artist_name,
-			disc_subtitle, search_participants, search_normalized,
-			content='', content_rowid='rowid',
-			tokenize='unicode61 remove_diacritics 2'
-		)
-	`,
-	`
-		CREATE VIRTUAL TABLE IF NOT EXISTS album_fts USING fts5(
-			name, sort_album_name, album_artist,
-			search_participants, discs, catalog_num, album_version, search_normalized,
-			content='', content_rowid='rowid',
-			tokenize='unicode61 remove_diacritics 2'
-		)
-	`,
-	`
-		CREATE VIRTUAL TABLE IF NOT EXISTS artist_fts USING fts5(
-			name, sort_artist_name, search_normalized,
-			content='', content_rowid='rowid',
-			tokenize='unicode61 remove_diacritics 2'
-		)
-	`,
-	`
-		INSERT INTO media_file_fts(rowid, title, album, artist, album_artist,
-			sort_title, sort_album_name, sort_artist_name, sort_album_artist_name,
-			disc_subtitle, search_participants, search_normalized)
-		SELECT rowid, title, album, artist, album_artist,
-			sort_title, sort_album_name, sort_artist_name, sort_album_artist_name,
-			COALESCE(disc_subtitle, ''), COALESCE(search_participants, ''),
-			COALESCE(search_normalized, '')
-		FROM media_file
-	`,
-	`
-		INSERT INTO album_fts(rowid, name, sort_album_name, album_artist,
-			search_participants, discs, catalog_num, album_version, search_normalized)
-		SELECT rowid, name, COALESCE(sort_album_name, ''), COALESCE(album_artist, ''),
-			COALESCE(search_participants, ''), COALESCE(discs, ''),
-			COALESCE(catalog_num, ''),
-			COALESCE((SELECT group_concat(json_extract(je.value, '$.value'), ' ')
-				FROM json_each(album.tags, '$.albumversion') AS je), ''),
-			COALESCE(search_normalized, '')
-		FROM album
-	`,
-	`
-		INSERT INTO artist_fts(rowid, name, sort_artist_name, search_normalized)
-		SELECT rowid, name, COALESCE(sort_artist_name, ''), COALESCE(search_normalized, '')
-		FROM artist
-	`,
-	`
-		CREATE TRIGGER media_file_fts_ai AFTER INSERT ON media_file BEGIN
-			INSERT INTO media_file_fts(rowid, title, album, artist, album_artist,
-				sort_title, sort_album_name, sort_artist_name, sort_album_artist_name,
-				disc_subtitle, search_participants, search_normalized)
-			VALUES (NEW.rowid, NEW.title, NEW.album, NEW.artist, NEW.album_artist,
-				NEW.sort_title, NEW.sort_album_name, NEW.sort_artist_name, NEW.sort_album_artist_name,
-				COALESCE(NEW.disc_subtitle, ''), COALESCE(NEW.search_participants, ''),
-				COALESCE(NEW.search_normalized, ''));
-		END
-	`,
-	`
-		CREATE TRIGGER media_file_fts_ad AFTER DELETE ON media_file BEGIN
-			INSERT INTO media_file_fts(media_file_fts, rowid, title, album, artist, album_artist,
-				sort_title, sort_album_name, sort_artist_name, sort_album_artist_name,
-				disc_subtitle, search_participants, search_normalized)
-			VALUES ('delete', OLD.rowid, OLD.title, OLD.album, OLD.artist, OLD.album_artist,
-				OLD.sort_title, OLD.sort_album_name, OLD.sort_artist_name, OLD.sort_album_artist_name,
-				COALESCE(OLD.disc_subtitle, ''), COALESCE(OLD.search_participants, ''),
-				COALESCE(OLD.search_normalized, ''));
-		END
-	`,
-	`
-		CREATE TRIGGER media_file_fts_au AFTER UPDATE ON media_file
-		WHEN
-			OLD.title IS NOT NEW.title OR
-			OLD.album IS NOT NEW.album OR
-			OLD.artist IS NOT NEW.artist OR
-			OLD.album_artist IS NOT NEW.album_artist OR
-			OLD.sort_title IS NOT NEW.sort_title OR
-			OLD.sort_album_name IS NOT NEW.sort_album_name OR
-			OLD.sort_artist_name IS NOT NEW.sort_artist_name OR
-			OLD.sort_album_artist_name IS NOT NEW.sort_album_artist_name OR
-			OLD.disc_subtitle IS NOT NEW.disc_subtitle OR
-			OLD.search_participants IS NOT NEW.search_participants OR
-			OLD.search_normalized IS NOT NEW.search_normalized
-		BEGIN
-			INSERT INTO media_file_fts(media_file_fts, rowid, title, album, artist, album_artist,
-				sort_title, sort_album_name, sort_artist_name, sort_album_artist_name,
-				disc_subtitle, search_participants, search_normalized)
-			VALUES ('delete', OLD.rowid, OLD.title, OLD.album, OLD.artist, OLD.album_artist,
-				OLD.sort_title, OLD.sort_album_name, OLD.sort_artist_name, OLD.sort_album_artist_name,
-				COALESCE(OLD.disc_subtitle, ''), COALESCE(OLD.search_participants, ''),
-				COALESCE(OLD.search_normalized, ''));
-			INSERT INTO media_file_fts(rowid, title, album, artist, album_artist,
-				sort_title, sort_album_name, sort_artist_name, sort_album_artist_name,
-				disc_subtitle, search_participants, search_normalized)
-			VALUES (NEW.rowid, NEW.title, NEW.album, NEW.artist, NEW.album_artist,
-				NEW.sort_title, NEW.sort_album_name, NEW.sort_artist_name, NEW.sort_album_artist_name,
-				COALESCE(NEW.disc_subtitle, ''), COALESCE(NEW.search_participants, ''),
-				COALESCE(NEW.search_normalized, ''));
-		END
-	`,
-	`
-		CREATE TRIGGER album_fts_ai AFTER INSERT ON album BEGIN
-			INSERT INTO album_fts(rowid, name, sort_album_name, album_artist,
-				search_participants, discs, catalog_num, album_version, search_normalized)
-			VALUES (NEW.rowid, NEW.name, COALESCE(NEW.sort_album_name, ''), COALESCE(NEW.album_artist, ''),
-				COALESCE(NEW.search_participants, ''), COALESCE(NEW.discs, ''),
-				COALESCE(NEW.catalog_num, ''),
-				COALESCE((SELECT group_concat(json_extract(je.value, '$.value'), ' ')
-					FROM json_each(NEW.tags, '$.albumversion') AS je), ''),
-				COALESCE(NEW.search_normalized, ''));
-		END
-	`,
-	`
-		CREATE TRIGGER album_fts_ad AFTER DELETE ON album BEGIN
-			INSERT INTO album_fts(album_fts, rowid, name, sort_album_name, album_artist,
-				search_participants, discs, catalog_num, album_version, search_normalized)
-			VALUES ('delete', OLD.rowid, OLD.name, COALESCE(OLD.sort_album_name, ''), COALESCE(OLD.album_artist, ''),
-				COALESCE(OLD.search_participants, ''), COALESCE(OLD.discs, ''),
-				COALESCE(OLD.catalog_num, ''),
-				COALESCE((SELECT group_concat(json_extract(je.value, '$.value'), ' ')
-					FROM json_each(OLD.tags, '$.albumversion') AS je), ''),
-				COALESCE(OLD.search_normalized, ''));
-		END
-	`,
-	`
-		CREATE TRIGGER album_fts_au AFTER UPDATE ON album
-		WHEN
-			OLD.name IS NOT NEW.name OR
-			OLD.sort_album_name IS NOT NEW.sort_album_name OR
-			OLD.album_artist IS NOT NEW.album_artist OR
-			OLD.search_participants IS NOT NEW.search_participants OR
-			OLD.discs IS NOT NEW.discs OR
-			OLD.catalog_num IS NOT NEW.catalog_num OR
-			OLD.tags IS NOT NEW.tags OR
-			OLD.search_normalized IS NOT NEW.search_normalized
-		BEGIN
-			INSERT INTO album_fts(album_fts, rowid, name, sort_album_name, album_artist,
-				search_participants, discs, catalog_num, album_version, search_normalized)
-			VALUES ('delete', OLD.rowid, OLD.name, COALESCE(OLD.sort_album_name, ''), COALESCE(OLD.album_artist, ''),
-				COALESCE(OLD.search_participants, ''), COALESCE(OLD.discs, ''),
-				COALESCE(OLD.catalog_num, ''),
-				COALESCE((SELECT group_concat(json_extract(je.value, '$.value'), ' ')
-					FROM json_each(OLD.tags, '$.albumversion') AS je), ''),
-				COALESCE(OLD.search_normalized, ''));
-			INSERT INTO album_fts(rowid, name, sort_album_name, album_artist,
-				search_participants, discs, catalog_num, album_version, search_normalized)
-			VALUES (NEW.rowid, NEW.name, COALESCE(NEW.sort_album_name, ''), COALESCE(NEW.album_artist, ''),
-				COALESCE(NEW.search_participants, ''), COALESCE(NEW.discs, ''),
-				COALESCE(NEW.catalog_num, ''),
-				COALESCE((SELECT group_concat(json_extract(je.value, '$.value'), ' ')
-					FROM json_each(NEW.tags, '$.albumversion') AS je), ''),
-				COALESCE(NEW.search_normalized, ''));
-		END
-	`,
-	`
-		CREATE TRIGGER artist_fts_ai AFTER INSERT ON artist BEGIN
-			INSERT INTO artist_fts(rowid, name, sort_artist_name, search_normalized)
-			VALUES (NEW.rowid, NEW.name, COALESCE(NEW.sort_artist_name, ''),
-				COALESCE(NEW.search_normalized, ''));
-		END
-	`,
-	`
-		CREATE TRIGGER artist_fts_ad AFTER DELETE ON artist BEGIN
-			INSERT INTO artist_fts(artist_fts, rowid, name, sort_artist_name, search_normalized)
-			VALUES ('delete', OLD.rowid, OLD.name, COALESCE(OLD.sort_artist_name, ''),
-				COALESCE(OLD.search_normalized, ''));
-		END
-	`,
-	`
-		CREATE TRIGGER artist_fts_au AFTER UPDATE ON artist
-		WHEN
-			OLD.name IS NOT NEW.name OR
-			OLD.sort_artist_name IS NOT NEW.sort_artist_name OR
-			OLD.search_normalized IS NOT NEW.search_normalized
-		BEGIN
-			INSERT INTO artist_fts(artist_fts, rowid, name, sort_artist_name, search_normalized)
-			VALUES ('delete', OLD.rowid, OLD.name, COALESCE(OLD.sort_artist_name, ''),
-				COALESCE(OLD.search_normalized, ''));
-			INSERT INTO artist_fts(rowid, name, sort_artist_name, search_normalized)
-			VALUES (NEW.rowid, NEW.name, COALESCE(NEW.sort_artist_name, ''),
-				COALESCE(NEW.search_normalized, ''));
-		END
-	`,
+	return VerifyFTS(ctx, database)
 }

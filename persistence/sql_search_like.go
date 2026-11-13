@@ -7,7 +7,6 @@ import (
 	. "github.com/Masterminds/squirrel"
 	"github.com/navidrome/navidrome/conf"
 	"github.com/navidrome/navidrome/log"
-	"github.com/navidrome/navidrome/model"
 	"github.com/navidrome/navidrome/utils/str"
 )
 
@@ -21,10 +20,10 @@ func (s *likeSearch) ToSql() (string, []any, error) {
 	return s.filter.ToSql()
 }
 
-func (s *likeSearch) execute(ctx context.Context, r sqlRepository, sq SelectBuilder, dest any, cfg searchConfig, options model.QueryOptions) error {
-	sq = sq.Where(s.filter)
-	sq = sq.OrderBy(cfg.OrderBy...)
-	return r.queryAll(ctx, sq, dest, options)
+func (s *likeSearch) execute(ctx context.Context, r sqlRepository, sq SelectBuilder, dest any, cfg searchConfig) error {
+	sq = clearOrder(sq).Where(s.filter)
+	sq = sq.OrderBy(cfg.OrderBy...).OrderBy(r.tableName + ".id")
+	return r.queryAll(ctx, sq, dest)
 }
 
 // newLegacySearch creates a LIKE search against the full_text column.
@@ -63,7 +62,7 @@ func legacySearchExpr(tableName string, s string) Sqlizer {
 	parts := strings.Split(q, " ")
 	filters := And{}
 	for _, part := range parts {
-		filters = append(filters, Like{tableName + ".full_text": "%" + sep + part + "%"})
+		filters = append(filters, ILike{tableName + ".full_text": "%" + sep + part + "%"})
 	}
 	log.Trace("Search using legacy backend", "query", filters, "table", tableName)
 	return filters
@@ -71,7 +70,7 @@ func legacySearchExpr(tableName string, s string) Sqlizer {
 
 // likeSearchColumns defines the core columns to search with LIKE queries.
 // These are the primary user-visible fields for each entity type.
-// Used as a fallback when FTS5 cannot handle the query (e.g., CJK text, punctuation-only input).
+// Used as a fallback when PostgreSQL full-text search cannot handle the query (e.g., CJK text, punctuation-only input).
 var likeSearchColumns = map[string][]string{
 	"media_file": {"title", "album", "artist", "album_artist"},
 	"album":      {"name", "album_artist"},
@@ -81,7 +80,7 @@ var likeSearchColumns = map[string][]string{
 // likeSearchExpr generates LIKE-based search filters against core columns.
 // Each word in the query must match at least one column (AND between words),
 // and each word can match any column (OR within a word).
-// Used as a fallback when FTS5 cannot handle the query (e.g., CJK text, punctuation-only input).
+// Used as a fallback when PostgreSQL full-text search cannot handle the query (e.g., CJK text, punctuation-only input).
 func likeSearchExpr(tableName string, s string) Sqlizer {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -96,9 +95,10 @@ func likeSearchExpr(tableName string, s string) Sqlizer {
 	words := strings.Fields(s)
 	wordFilters := And{}
 	for _, word := range words {
+		word = escapeLikePrefix(word)
 		colFilters := Or{}
 		for _, col := range columns {
-			colFilters = append(colFilters, Like{tableName + "." + col: "%" + word + "%"})
+			colFilters = append(colFilters, ILike{tableName + "." + col: "%" + word + "%"})
 		}
 		wordFilters = append(wordFilters, colFilters)
 	}

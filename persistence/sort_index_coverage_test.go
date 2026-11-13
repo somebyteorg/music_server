@@ -3,9 +3,9 @@ package persistence
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"maps"
-	"regexp"
 	"slices"
 
 	"github.com/navidrome/navidrome/conf"
@@ -18,26 +18,9 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-// These tests guard against sort options silently losing index support: adding or
-// changing a sort mapping, or dropping/renaming an index in a migration, must not
-// reintroduce full-table temp B-tree sorts on the large tables. Those are
-// catastrophic on big libraries but invisible on dev-sized ones, which is how the
-// unindexed album/artist song sorts went unnoticed for years.
-//
-// Every sort mapping is checked automatically: the real ORDER BY is built via
-// buildSortOrder (both directions) and verified with EXPLAIN QUERY PLAN against
-// the migrated test schema. The planner's choice is deterministic even on an
-// empty table. A sort passes when the plan has no full "USE TEMP B-TREE FOR
-// ORDER BY" step; an incremental sort of tie groups ("... FOR LAST TERM OF ORDER
-// BY") is fine, as it only sorts rows with equal leading columns.
-//
-// A new sort mapping therefore fails this test until a matching index is created.
-// The only escape hatch is exceptions, for sorts that genuinely cannot be
-// served by a table index (random, annotation-join columns, JSON expressions):
-// declaring one requires writing down the reason, making the trade-off visible in
-// review. The checks run with the default config: PreferSortTags=true rewrites
-// mappings to coalesce expressions with no matching indexes (used by ~0.1% of
-// installations, per insights), and is out of scope here.
+// Sort mappings must retain an index path on large libraries. Disable sequential
+// scans within the EXPLAIN transaction so tiny fixtures do not favor a full sort.
+// Incremental sorts are allowed: only groups sharing the index prefix are sorted.
 var _ = Describe("Sort index coverage", func() {
 	conn := db.Db()
 
@@ -138,31 +121,34 @@ var _ = Describe("Sort index coverage", func() {
 	})
 })
 
-// Matches the full-sort step only: incremental tie-group sorts are reported as
-// "USE TEMP B-TREE FOR LAST TERM OF ORDER BY" (or "LAST N TERMS") and are allowed.
-var fullTempBTreeSort = regexp.MustCompile(`USE TEMP B-TREE FOR ORDER BY`)
-
 func checkSortUsesIndex(conn *sql.DB, table, orderBy string) error {
-	rows, err := conn.Query(fmt.Sprintf("explain query plan select * from %s order by %s limit 15", table, orderBy))
+	tx, err := conn.Begin()
 	if err != nil {
-		return fmt.Errorf("explain query plan failed for order by %q: %w", orderBy, err)
-	}
-	defer rows.Close()
-
-	var details []string
-	for rows.Next() {
-		var id, parent, notUsed int
-		var detail string
-		if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
-			return err
-		}
-		details = append(details, detail)
-	}
-	if err := rows.Err(); err != nil {
 		return err
 	}
-	if slices.ContainsFunc(details, fullTempBTreeSort.MatchString) {
-		return fmt.Errorf("no index satisfies ORDER BY %s - plan: %v", orderBy, details)
+	defer tx.Rollback()
+	if _, err := tx.Exec("SET LOCAL enable_seqscan = off"); err != nil {
+		return err
+	}
+	var raw []byte
+	if err := tx.QueryRow(fmt.Sprintf("EXPLAIN (FORMAT JSON) SELECT * FROM %s ORDER BY %s LIMIT 15", table, orderBy)).Scan(&raw); err != nil {
+		return fmt.Errorf("explain failed for ORDER BY %q: %w", orderBy, err)
+	}
+	var plans []struct{ Plan queryPlan }
+	if err := json.Unmarshal(raw, &plans); err != nil {
+		return err
+	}
+	var fullSort func(queryPlan) bool
+	fullSort = func(plan queryPlan) bool {
+		return plan.NodeType == "Sort" || slices.ContainsFunc(plan.Plans, fullSort)
+	}
+	if len(plans) != 1 || fullSort(plans[0].Plan) {
+		return fmt.Errorf("no index satisfies ORDER BY %s: %s", orderBy, raw)
 	}
 	return nil
+}
+
+type queryPlan struct {
+	NodeType string      `json:"Node Type"`
+	Plans    []queryPlan `json:"Plans"`
 }

@@ -2,7 +2,6 @@ package persistence
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -24,9 +23,12 @@ func seedAnnotations(itemType string, ids ...string) {
 	GinkgoHelper()
 	when := time.Date(2024, 3, 1, 12, 0, 0, 0, time.UTC)
 	for i, id := range ids {
-		_, err := GetDBXBuilder().NewQuery(`insert or replace into annotation
+		_, err := GetDBXBuilder().NewQuery(`insert into annotation
 			(user_id, item_id, item_type, play_count, play_date, rating, rated_at, starred, starred_at)
-			values ({:u}, {:id}, {:t}, {:pc}, {:d}, {:r}, {:d}, 1, {:d})`).
+			values ({:u}, {:id}, {:t}, {:pc}, {:d}, {:r}, {:d}, true, {:d})
+            ON CONFLICT (user_id,item_id,item_type) DO UPDATE SET
+            play_count=excluded.play_count,play_date=excluded.play_date,rating=excluded.rating,
+            rated_at=excluded.rated_at,starred=excluded.starred,starred_at=excluded.starred_at`).
 			Bind(dbx.Params{"u": adminUser.ID, "id": id, "t": itemType,
 				"pc": i + 1, "r": 4 + i, "d": when.Add(time.Duration(i) * time.Hour)}).Execute()
 		Expect(err).ToNot(HaveOccurred())
@@ -578,7 +580,7 @@ var _ = Describe("Artwork hydration", func() {
 			opts := model.QueryOptions{Sort: "name", Filters: onlyPlaylists}
 
 			// Both phases must filter on their own: the id pre-pass and the chunk fetch.
-			Expect(repo.(*playlistRepository).getAllIDs(otherCtx, opts)).To(ConsistOf(plsBest.ID))
+			Expect(collectCursor(repo.GetCursor(otherCtx, opts))).To(ConsistOf(HaveField("ID", plsBest.ID)))
 			all, err := repo.GetAll(otherCtx, model.QueryOptions{Filters: onlyPlaylists})
 			Expect(err).ToNot(HaveOccurred())
 			Expect(slice.Map(all, func(p model.Playlist) string { return p.ID })).To(ConsistOf(plsBest.ID))
@@ -665,76 +667,6 @@ var _ = Describe("Artwork hydration", func() {
 
 			Expect(slice.Map(got, func(mf model.MediaFile) string { return mf.ID })).
 				To(Equal(slice.Map(want, func(mf model.MediaFile) string { return mf.ID })))
-		})
-	})
-
-	Describe("chunkOptions", func() {
-		It("carries Sort, Order and the caller's filters, but never Max/Offset", func() {
-			base := model.QueryOptions{Sort: "name", Order: "desc", Max: 10, Offset: 20,
-				Filters: squirrel.Eq{"missing": false}}
-
-			got := chunkOptions([]model.QueryOptions{base}, "album.id")([]string{"al-1", "al-2"})
-
-			Expect(got.Max).To(BeZero())
-			Expect(got.Offset).To(BeZero())
-			Expect(got.Sort).To(Equal("name"))
-			Expect(got.Order).To(Equal("desc"))
-			Expect(got.Filters).To(Equal(squirrel.And{
-				base.Filters, squirrel.Eq{"album.id": []string{"al-1", "al-2"}},
-			}))
-		})
-
-		It("filters by ids alone when the caller passed no filters", func() {
-			got := chunkOptions(nil, "artist.id")([]string{"ar-1"})
-			Expect(got.Filters).To(Equal(squirrel.Eq{"artist.id": []string{"ar-1"}}))
-		})
-	})
-
-	Describe("streamByIDs", func() {
-		It("fetches in chunks and yields every row in order", func() {
-			ids := make([]string, artworkChunkSize+3)
-			for i := range ids {
-				ids[i] = fmt.Sprintf("id-%d", i)
-			}
-			var chunks [][]string
-			got := collectCursor(streamByIDs(ids, func(chunk []string) ([]string, error) {
-				chunks = append(chunks, chunk)
-				return chunk, nil
-			}), nil)
-
-			Expect(chunks).To(HaveLen(2))
-			Expect(chunks[0]).To(HaveLen(artworkChunkSize))
-			Expect(chunks[1]).To(HaveLen(3))
-			Expect(got).To(Equal(ids))
-		})
-
-		It("yields the fetch error and stops", func() {
-			ids := make([]string, artworkChunkSize+1)
-			calls := 0
-			var errs []error
-			for _, err := range streamByIDs(ids, func(chunk []string) ([]string, error) {
-				calls++
-				return nil, errors.New("boom")
-			}) {
-				errs = append(errs, err)
-			}
-
-			Expect(calls).To(Equal(1))
-			Expect(errs).To(HaveLen(1))
-			Expect(errs[0]).To(MatchError("boom"))
-		})
-
-		It("stops fetching when the consumer breaks", func() {
-			ids := make([]string, artworkChunkSize+1)
-			calls := 0
-			for range streamByIDs(ids, func(chunk []string) ([]string, error) {
-				calls++
-				return chunk, nil
-			}) {
-				break
-			}
-
-			Expect(calls).To(Equal(1))
 		})
 	})
 

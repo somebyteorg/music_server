@@ -155,7 +155,7 @@ var _ = Describe("ArtworkQueueRepository", func() {
 		Expect(repo.EnqueuePreservingBackoff(ctx, item("al", "t1", model.ArtworkPriorityBump))).To(Succeed())
 		kept, err := repo.Get(ctx, model.KindAlbumArtwork, "t1", model.ImageTypePrimary)
 		Expect(err).ToNot(HaveOccurred())
-		Expect(kept.Trace).To(Equal(`[{"c":"read","o":"error"}]`))
+		Expect(kept.Trace).To(MatchJSON(`[{"c":"read","o":"error"}]`))
 
 		// A fresh Enqueue resets attempts to 0, so the stale failure trace must be cleared with it.
 		Expect(repo.Enqueue(ctx, item("al", "t1", model.ArtworkPriorityScan))).To(Succeed())
@@ -503,7 +503,7 @@ var _ = Describe("ArtworkQueueRepository", func() {
 				Error().To(MatchError(model.ErrNotFound))
 		})
 
-		// A WHERE clause, even one that matches everything, costs SQLite its truncate optimization
+		// Delete every row explicitly to exercise the empty-queue behavior.
 		// and turns `artwork cancel --all` into a full scan of the queue.
 		It("adds no conditions at all for an empty filter", func() {
 			Expect(artworkQueueFilter(nil, nil)).To(BeEmpty())

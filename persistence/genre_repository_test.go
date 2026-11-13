@@ -33,9 +33,9 @@ var _ = Describe("GenreRepository", func() {
 		Expect(err).ToNot(HaveOccurred())
 
 		// Ensure library 1 exists and user has access to it
-		_, err = db.NewQuery("INSERT OR IGNORE INTO library (id, name, path, default_new_users) VALUES (1, 'Test Library', '/test', true)").Execute()
+		_, err = db.NewQuery("INSERT INTO library (id, name, path, default_new_users) VALUES (1, 'Test Library', '/test', true) ON CONFLICT DO NOTHING").Execute()
 		Expect(err).ToNot(HaveOccurred())
-		_, err = db.NewQuery("INSERT OR IGNORE INTO user_library (user_id, library_id) VALUES ('userid', 1)").Execute()
+		_, err = db.NewQuery("INSERT INTO user_library (user_id, library_id) VALUES ('userid', 1) ON CONFLICT DO NOTHING").Execute()
 		Expect(err).ToNot(HaveOccurred())
 
 		// Add comprehensive test data that covers all test scenarios
@@ -101,7 +101,7 @@ var _ = Describe("GenreRepository", func() {
 			It("should filter by name using like match", func() {
 				// Test filtering by partial name match using the "name" filter which maps to containsFilter("tag_value")
 				options := model.QueryOptions{
-					Filters: squirrel.Like{"tag_value": "%rock%"}, // Direct field access
+					Filters: squirrel.ILike{"tag_value": "%rock%"}, // Direct field access
 				}
 				genres, err := repo.GetAll(ctx, options)
 				Expect(err).ToNot(HaveOccurred())
@@ -250,7 +250,7 @@ var _ = Describe("GenreRepository", func() {
 
 				// Add genres to different libraries
 				db := GetDBXBuilder()
-				_, err := db.NewQuery("INSERT OR IGNORE INTO library (id, name, path) VALUES (2, 'Test Library 2', '/test2')").Execute()
+				_, err := db.NewQuery("INSERT INTO library (id, name, path) VALUES (2, 'Test Library 2', '/test2') ON CONFLICT DO NOTHING").Execute()
 				Expect(err).ToNot(HaveOccurred())
 
 				// Add tags to different libraries

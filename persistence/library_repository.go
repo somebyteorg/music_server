@@ -4,26 +4,18 @@ import (
 	"context"
 	"fmt"
 	"strconv"
-	"sync"
-	"time"
 
 	. "github.com/Masterminds/squirrel"
 	"github.com/deluan/rest"
 	"github.com/navidrome/navidrome/conf"
 	"github.com/navidrome/navidrome/log"
 	"github.com/navidrome/navidrome/model"
-	"github.com/navidrome/navidrome/utils/run"
 	"github.com/pocketbase/dbx"
 )
 
 type libraryRepository struct {
 	sqlRepository
 }
-
-var (
-	libCache = map[int]string{}
-	libLock  sync.RWMutex
-)
 
 func NewLibraryRepository(db dbx.Builder) model.LibraryRepository {
 	r := &libraryRepository{}
@@ -40,36 +32,20 @@ func (r *libraryRepository) Get(ctx context.Context, id int) (*model.Library, er
 }
 
 func (r *libraryRepository) GetPath(ctx context.Context, id int) (string, error) {
-	l := func() string {
-		libLock.RLock()
-		defer libLock.RUnlock()
-		if l, ok := libCache[id]; ok {
-			return l
-		}
-		return ""
-	}()
-	if l != "" {
-		return l, nil
-	}
-
-	libLock.Lock()
-	defer libLock.Unlock()
-	libs, err := r.GetAll(ctx)
-	if err != nil {
-		log.Error(ctx, "Error loading libraries from DB", err)
-		return "", err
-	}
-	for _, l := range libs {
-		libCache[l.ID] = l.Path
-	}
-	if l, ok := libCache[id]; ok {
-		return l, nil
-	} else {
-		return "", model.ErrNotFound
-	}
+	var result struct{ Path string }
+	err := r.queryOne(ctx, Select("path").From(r.tableName).Where(Eq{"id": id}), &result)
+	return result.Path, err
 }
 
 func (r *libraryRepository) Put(ctx context.Context, l *model.Library, colsToUpdate ...string) error {
+	return r.withTx(ctx, func(base sqlRepository) error {
+		scoped := *r
+		scoped.sqlRepository = base
+		return scoped.putLibrary(ctx, l, colsToUpdate...)
+	})
+}
+
+func (r *libraryRepository) putLibrary(ctx context.Context, l *model.Library, colsToUpdate ...string) error {
 	if l.ID == model.DefaultLibraryID {
 		currentLib, err := r.Get(ctx, 1)
 		// if we are creating it, it's ok.
@@ -81,11 +57,11 @@ func (r *libraryRepository) Put(ctx context.Context, l *model.Library, colsToUpd
 	}
 
 	var err error
-	l.UpdatedAt = time.Now()
+	l.UpdatedAt = databaseNow()
 	if l.ID == 0 {
 		// Insert with autoassigned ID
-		l.CreatedAt = time.Now()
-		err = r.db.Model(l).Insert()
+		l.CreatedAt = databaseNow()
+		err = r.db.Model(l).WithContext(ctx).Insert()
 	} else {
 		// Try to update first
 		cols := selectUpdateColumns(map[string]any{
@@ -105,9 +81,9 @@ func (r *libraryRepository) Put(ctx context.Context, l *model.Library, colsToUpd
 
 		// If no rows were affected, the record doesn't exist, so insert it
 		if rowsAffected == 0 {
-			l.CreatedAt = time.Now()
-			l.UpdatedAt = time.Now()
-			err = r.db.Model(l).Insert()
+			l.CreatedAt = databaseNow()
+			l.UpdatedAt = databaseNow()
+			err = r.db.Model(l).WithContext(ctx).Insert()
 		}
 	}
 	if err != nil {
@@ -118,7 +94,7 @@ func (r *libraryRepository) Put(ctx context.Context, l *model.Library, colsToUpd
 	sql := Expr(`
 INSERT INTO user_library (user_id, library_id)
 SELECT u.id, l.id
-FROM user u
+FROM app_user u
 CROSS JOIN library l
 WHERE u.is_admin = true
 ON CONFLICT (user_id, library_id) DO NOTHING;`,
@@ -127,9 +103,6 @@ ON CONFLICT (user_id, library_id) DO NOTHING;`,
 		return fmt.Errorf("failed to assign library to admin users: %w", err)
 	}
 
-	libLock.Lock()
-	defer libLock.Unlock()
-	libCache[l.ID] = l.Path
 	return nil
 }
 
@@ -137,15 +110,10 @@ ON CONFLICT (user_id, library_id) DO NOTHING;`,
 // This is a temporary method to store the music folder path from the config in the DB
 func (r *libraryRepository) StoreMusicFolder(ctx context.Context) error {
 	sq := Update(r.tableName).Set("path", conf.Server.MusicFolder).
-		Set("updated_at", time.Now()).
+		Set("updated_at", databaseNow()).
 		Where(Eq{"id": model.DefaultLibraryID}).
 		Where(NotEq{"path": conf.Server.MusicFolder})
-	rowsAffected, err := r.executeSQL(ctx, sq)
-	if err == nil && rowsAffected > 0 {
-		libLock.Lock()
-		defer libLock.Unlock()
-		libCache[model.DefaultLibraryID] = conf.Server.MusicFolder
-	}
+	_, err := r.executeSQL(ctx, sq)
 	return err
 }
 
@@ -159,98 +127,15 @@ func (r *libraryRepository) AddArtist(ctx context.Context, id int, artistID stri
 	return nil
 }
 
-func (r *libraryRepository) ScanBegin(ctx context.Context, id int, fullScan bool) error {
-	sq := Update(r.tableName).
-		Set("last_scan_started_at", time.Now()).
-		Set("full_scan_in_progress", fullScan).
-		Where(Eq{"id": id})
-	_, err := r.executeSQL(ctx, sq)
-	return err
-}
-
-func (r *libraryRepository) ScanEnd(ctx context.Context, id int) error {
-	sq := Update(r.tableName).
-		Set("last_scan_at", time.Now()).
-		Set("full_scan_in_progress", false).
-		Set("last_scan_started_at", time.Time{}).
-		Where(Eq{"id": id})
-	_, err := r.executeSQL(ctx, sq)
-	return err
-}
-
-func (r *libraryRepository) SetScannedPID(ctx context.Context, id int, pid model.PIDConfig) error {
-	sq := Update(r.tableName).
-		Set("scanned_pid_album", pid.Album).
-		Set("scanned_pid_track", pid.Track).
-		Where(Eq{"id": id})
-	_, err := r.executeSQL(ctx, sq)
-	return err
-}
-
-func (r *libraryRepository) ScanInProgress(ctx context.Context) (bool, error) {
-	query := r.newSelect(ctx).Where(NotEq{"last_scan_started_at": time.Time{}})
-	count, err := r.count(ctx, query)
-	return count > 0, err
-}
-
-func (r *libraryRepository) RefreshStats(ctx context.Context, id int) error {
-	var songsRes, albumsRes, artistsRes, foldersRes, filesRes, missingRes struct{ Count int64 }
-	var sizeRes struct{ Sum int64 }
-	var durationRes struct{ Sum float64 }
-
-	err := run.Parallel(
-		func() error {
-			return r.queryOne(ctx, Select("count(*) as count").From("media_file").Where(Eq{"library_id": id, "missing": false}), &songsRes)
-		},
-		func() error {
-			return r.queryOne(ctx, Select("count(*) as count").From("album").Where(Eq{"library_id": id, "missing": false}), &albumsRes)
-		},
-		func() error {
-			return r.queryOne(ctx, Select("count(*) as count").From("library_artist la").
-				Join("artist a on la.artist_id = a.id").
-				Where(Eq{"la.library_id": id, "a.missing": false}), &artistsRes)
-		},
-		func() error {
-			return r.queryOne(ctx, Select("count(*) as count").From("folder").
-				Where(And{
-					Eq{"library_id": id, "missing": false},
-					Gt{"num_audio_files": 0},
-				}), &foldersRes)
-		},
-		func() error {
-			return r.queryOne(ctx, Select("ifnull(sum(num_audio_files + num_playlists + json_array_length(image_files)),0) as count").
-				From("folder").Where(Eq{"library_id": id, "missing": false}), &filesRes)
-		},
-		func() error {
-			return r.queryOne(ctx, Select("count(*) as count").From("media_file").Where(Eq{"library_id": id, "missing": true}), &missingRes)
-		},
-		func() error {
-			return r.queryOne(ctx, Select("ifnull(sum(size),0) as sum").From("album").Where(Eq{"library_id": id, "missing": false}), &sizeRes)
-		},
-		func() error {
-			return r.queryOne(ctx, Select("ifnull(sum(duration),0) as sum").From("album").Where(Eq{"library_id": id, "missing": false}), &durationRes)
-		},
-	)()
-	if err != nil {
-		return err
-	}
-
-	sq := Update(r.tableName).
-		Set("total_songs", songsRes.Count).
-		Set("total_albums", albumsRes.Count).
-		Set("total_artists", artistsRes.Count).
-		Set("total_folders", foldersRes.Count).
-		Set("total_files", filesRes.Count).
-		Set("total_missing_files", missingRes.Count).
-		Set("total_size", sizeRes.Sum).
-		Set("total_duration", durationRes.Sum).
-		Set("updated_at", time.Now()).
-		Where(Eq{"id": id})
-	_, err = r.executeSQL(ctx, sq)
-	return err
-}
-
 func (r *libraryRepository) Delete(ctx context.Context, id int) error {
+	return r.withTx(ctx, func(base sqlRepository) error {
+		scoped := *r
+		scoped.sqlRepository = base
+		return scoped.deleteLibrary(ctx, id)
+	})
+}
+
+func (r *libraryRepository) deleteLibrary(ctx context.Context, id int) error {
 	if !loggedUser(ctx).IsAdmin {
 		return model.ErrNotAuthorized
 	}
@@ -268,14 +153,9 @@ func (r *libraryRepository) Delete(ctx context.Context, id int) error {
 		return fmt.Errorf("marking orphaned artists missing after deleting library %d: %w", id, err)
 	}
 
-	// Clear cache entry for this library only if DB operation was successful
-	libLock.Lock()
-	defer libLock.Unlock()
-	delete(libCache, id)
-
 	// Clean up orphaned plugin references for the deleted library
-	if err := cleanupPluginLibraryReferences(r.db, id); err != nil {
-		log.Error(ctx, "Failed to cleanup plugin library references", "libraryID", id, err)
+	if err := cleanupPluginLibraryReferences(ctx, r.db, id); err != nil {
+		return fmt.Errorf("cleaning plugin library references: %w", err)
 	}
 	return nil
 }
@@ -296,7 +176,7 @@ func (r *libraryRepository) CountAll(ctx context.Context, ops ...model.QueryOpti
 
 func (r *libraryRepository) GetUsersWithLibraryAccess(ctx context.Context, libraryID int) (model.Users, error) {
 	sel := Select("u.*").
-		From("user u").
+		From("app_user u").
 		Join("user_library ul ON u.id = ul.user_id").
 		Where(Eq{"ul.library_id": libraryID}).
 		OrderBy("u.name")

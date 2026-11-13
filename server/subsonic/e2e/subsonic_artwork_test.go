@@ -265,14 +265,7 @@ func buildArtworkRouter(art artwork.Artwork) *subsonic.Router {
 // disabled for the bulk delete, mirroring harness.Restore.
 func wipeScannedContent() {
 	GinkgoHelper()
-	_, err := db.Db().Exec("PRAGMA foreign_keys = OFF")
-	Expect(err).ToNot(HaveOccurred())
-	for _, t := range []string{"media_file", "album", "artist", "folder", "item_artwork", "artwork_queue", "artwork", "library"} {
-		_, err = db.Db().Exec(`DELETE FROM "` + t + `"`)
-		Expect(err).ToNot(HaveOccurred(), "wiping %s", t)
-	}
-	_, err = db.Db().Exec("PRAGMA foreign_keys = ON")
-	Expect(err).ToNot(HaveOccurred())
+	harness.TruncateDB([]string{"media_file", "album", "artist", "folder", "item_artwork", "artwork_queue", "artwork", "library"})
 }
 
 func albumIDByName(name string) string {

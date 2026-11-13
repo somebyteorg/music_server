@@ -21,16 +21,8 @@ func NewPropertyRepository(db dbx.Builder) model.PropertyRepository {
 }
 
 func (r propertyRepository) Put(ctx context.Context, id string, value string) error {
-	update := Update(r.tableName).Set("value", value).Where(Eq{"id": id})
-	count, err := r.executeSQL(ctx, update)
-	if err != nil {
-		return err
-	}
-	if count > 0 {
-		return nil
-	}
-	insert := Insert(r.tableName).Columns("id", "value").Values(id, value)
-	_, err = r.executeSQL(ctx, insert)
+	_, err := r.executeSQL(ctx, Insert(r.tableName).Columns("id", "value").Values(id, value).
+		Suffix("ON CONFLICT (id) DO UPDATE SET value = EXCLUDED.value"))
 	return err
 }
 

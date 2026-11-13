@@ -2,6 +2,7 @@ package persistence
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"time"
 
@@ -20,7 +21,26 @@ import (
 
 // refreshSmartPlaylist evaluates the criteria of a smart playlist and updates its tracks accordingly.
 func (r *playlistRepository) refreshSmartPlaylist(ctx context.Context, pls *model.Playlist) bool {
-	return r.refreshSmartPlaylistTree(ctx, pls, map[string]struct{}{})
+	if !r.shouldRefreshSmartPlaylist(ctx, pls, loggedUser(ctx)) {
+		return false
+	}
+	working := *pls
+	refreshed := false
+	err := r.withTx(ctx, func(tx sqlRepository) error {
+		scoped := *r
+		scoped.sqlRepository = tx
+		refreshed = scoped.refreshSmartPlaylistTree(ctx, &working, map[string]struct{}{})
+		if !refreshed {
+			return errors.New("smart playlist refresh did not complete")
+		}
+		return nil
+	})
+	if err != nil {
+		log.Warn(ctx, "Smart playlist refresh rolled back", "id", pls.ID, err)
+		return false
+	}
+	*pls = working
+	return refreshed
 }
 
 // The visited set stops playlists that reference each other from recursing forever.
@@ -36,6 +56,14 @@ func (r *playlistRepository) refreshSmartPlaylistTree(ctx context.Context, pls *
 		return false
 	}
 
+	var current struct{ EvaluatedAt *time.Time }
+	if err := r.queryOne(ctx, Select("evaluated_at").From("playlist").Where(Eq{"id": pls.ID}).Suffix("FOR UPDATE SKIP LOCKED"), &current); err != nil {
+		return false
+	}
+	pls.EvaluatedAt = current.EvaluatedAt
+	if !r.shouldRefreshSmartPlaylist(ctx, pls, usr) {
+		return true
+	}
 	log.Debug(ctx, "Refreshing smart playlist", "playlist", pls.Name, "id", pls.ID)
 	start := time.Now()
 
@@ -132,7 +160,11 @@ func (r *playlistRepository) refreshChildPlaylists(ctx context.Context, pls *mod
 		if childPlaylists[i].Path != "" {
 			found[norm.NFC.String(childPlaylists[i].Path)] = struct{}{}
 		}
-		r.refreshSmartPlaylistTree(ctx, &childPlaylists[i], visited)
+		if _, seen := visited[childPlaylists[i].ID]; !seen && r.shouldRefreshSmartPlaylist(ctx, &childPlaylists[i], loggedUser(ctx)) {
+			if !r.refreshSmartPlaylistTree(ctx, &childPlaylists[i], visited) {
+				return false
+			}
+		}
 	}
 	for _, id := range childPlaylistIds {
 		if _, ok := found[id]; !ok {
@@ -180,6 +212,9 @@ func (r *playlistRepository) resolvePercentageLimit(ctx context.Context, pls *mo
 // including the joins its fields require and library filtering.
 func (r *playlistRepository) buildSmartPlaylistQuery(ctx context.Context, pls *model.Playlist, rulesSQL smartPlaylistCriteria, userID string) SelectBuilder {
 	orderBy := rulesSQL.orderBy()
+	if orderBy == "" {
+		orderBy = "media_file.id"
+	}
 	sq := Select("row_number() over (order by "+orderBy+") as id", "'"+pls.ID+"' as playlist_id", "media_file.id as media_file_id").
 		From("media_file")
 	sq = rulesSQL.applyRequiredJoins(sq, userID)

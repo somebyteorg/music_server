@@ -76,7 +76,7 @@ var smartPlaylistFields = map[string]smartPlaylistField{
 	"datemodified":         {expr: "media_file.updated_at"},
 	"discsubtitle":         {expr: "media_file.disc_subtitle"},
 	"comment":              {expr: "media_file.comment"},
-	"lyrics":               {expr: "media_file.lyrics", emptyValues: []string{"[]"}},
+	"lyrics":               {expr: "media_file.lyrics", emptyValues: []string{"[]", "null"}},
 	"sorttitle":            {expr: "media_file.sort_title"},
 	"sortalbum":            {expr: "media_file.sort_album_name"},
 	"sortartist":           {expr: "media_file.sort_artist_name"},
@@ -224,7 +224,7 @@ func missingExpr(values map[string]any, checkAbsence bool) (squirrel.Sqlizer, er
 		return jsonExpr(info, nil, negate), nil
 	case info.Nullable:
 		// Nullable column fields are stored in dedicated columns, not in the tags JSON, so
-		// "missing" maps to a column check rather than a json_tree lookup. Numeric/boolean
+		// "missing" maps to a column check rather than expanding JSON. Numeric/boolean
 		// columns (e.g. ReplayGain, BPM) encode absence as NULL only; string columns (e.g.
 		// mbz_* IDs, lyrics) additionally treat empty string — and any field-specific empty
 		// encodings (e.g. '[]' for lyrics) — as missing. The unified flow below handles both:
@@ -236,7 +236,11 @@ func missingExpr(values map[string]any, checkAbsence bool) (squirrel.Sqlizer, er
 		col := f.expr
 		var empties []string
 		if !info.Numeric && !info.Boolean {
-			empties = append([]string{""}, f.emptyValues...)
+			if info.Name() == "lyrics" {
+				empties = f.emptyValues
+			} else {
+				empties = append([]string{""}, f.emptyValues...)
+			}
 		}
 		missing := squirrel.Or{squirrel.Eq{col: nil}}
 		present := squirrel.And{squirrel.NotEq{col: nil}}
@@ -256,13 +260,13 @@ func missingExpr(values map[string]any, checkAbsence bool) (squirrel.Sqlizer, er
 func likeExpr(values map[string]any, pattern string, negate bool) (squirrel.Sqlizer, error) {
 	if _, value, info, ok := singleField(values); ok {
 		if info.IsTag || info.IsRole {
-			return jsonExpr(info, squirrel.Like{"value": fmt.Sprintf(pattern, value)}, negate), nil
+			return jsonExpr(info, squirrel.ILike{"value": fmt.Sprintf(pattern, value)}, negate), nil
 		}
 		// LIKE can't use the column index, so annotation fields keep the COALESCE form: a NULL
 		// column never matches LIKE, which would silently drop missing-annotation rows the original
 		// COALESCE form included.
 		if f, isAnnotation := annotationField(info); isAnnotation {
-			return likeCond(f.coalesced(), fmt.Sprintf(pattern, value), negate), nil
+			return likeCond("CAST("+f.coalesced()+" AS text)", fmt.Sprintf(pattern, value), negate), nil
 		}
 	}
 	fields, err := sqlFields(values)
@@ -270,24 +274,24 @@ func likeExpr(values map[string]any, pattern string, negate bool) (squirrel.Sqli
 		return nil, err
 	}
 	if negate {
-		lk := squirrel.NotLike{}
+		lk := squirrel.NotILike{}
 		for field, value := range fields {
-			lk[field] = fmt.Sprintf(pattern, value)
+			lk["CAST("+field+" AS text)"] = fmt.Sprintf(pattern, value)
 		}
 		return lk, nil
 	}
-	lk := squirrel.Like{}
+	lk := squirrel.ILike{}
 	for field, value := range fields {
-		lk[field] = fmt.Sprintf(pattern, value)
+		lk["CAST("+field+" AS text)"] = fmt.Sprintf(pattern, value)
 	}
 	return lk, nil
 }
 
 func likeCond(col, pattern string, negate bool) squirrel.Sqlizer {
 	if negate {
-		return squirrel.NotLike{col: pattern}
+		return squirrel.NotILike{col: pattern}
 	}
-	return squirrel.Like{col: pattern}
+	return squirrel.ILike{col: pattern}
 }
 
 func rangeExpr(values map[string]any) (squirrel.Sqlizer, error) {
@@ -356,10 +360,10 @@ func (c smartPlaylistCriteria) inList(values map[string]any, negate bool) (squir
 	filters := squirrel.And{condition}
 	if !c.owner.IsAdmin {
 		if c.owner.ID == "" {
-			filters = append(filters, squirrel.Eq{"playlist.public": 1})
+			filters = append(filters, squirrel.Eq{"playlist.public": true})
 		} else {
 			filters = append(filters, squirrel.Or{
-				squirrel.Eq{"playlist.public": 1},
+				squirrel.Eq{"playlist.public": true},
 				squirrel.Eq{"playlist.owner_id": c.owner.ID},
 			})
 		}
@@ -404,23 +408,22 @@ type tagCond struct {
 	not     bool
 }
 
+const numericTagValue = "CASE WHEN value ~ '^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$' THEN CAST(value AS double precision) END"
+
 func (e tagCond) ToSql() (string, []any, error) {
-	var cond string
-	var args []any
-	var err error
-	if e.cond != nil {
-		cond, args, err = e.cond.ToSql()
-		if e.numeric {
-			cond = strings.ReplaceAll(cond, "value", "CAST(value AS REAL)")
+	condition := e.cond
+	if e.numeric && condition != nil {
+		sql, args, err := condition.ToSql()
+		if err != nil {
+			return "", nil, err
 		}
-		cond = fmt.Sprintf("exists (select 1 from json_tree(media_file.tags, '$.%s') where key='value' and %s)", e.tag, cond)
-	} else {
-		cond = fmt.Sprintf("exists (select 1 from json_tree(media_file.tags, '$.%s') where key='value')", e.tag)
+		condition = squirrel.Expr(strings.ReplaceAll(sql, "value", "("+numericTagValue+")"), args...)
 	}
+	sql, args, err := TagFilter("media_file.tags", e.tag, condition).ToSql()
 	if e.not {
-		cond = "not " + cond
+		sql = "not " + sql
 	}
-	return cond, args, err
+	return sql, args, err
 }
 
 type roleCond struct {
@@ -465,7 +468,7 @@ func roleExistsSQL(innerCond string) string {
 }
 
 // jsonCondBatchSize limits how many conditions are ORed inside a single EXISTS subquery
-// to stay within SQLite's expression tree depth limit (max 1000). The EXISTS wrapper
+// to keep large criteria expressions bounded. The EXISTS wrapper
 // consumes ~4 levels; each ORed condition adds 1 level. Empirically, 496 is the maximum.
 const jsonCondBatchSize = 350
 
@@ -602,25 +605,7 @@ type tagCondGroup struct {
 }
 
 func (g tagCondGroup) ToSql() (string, []any, error) {
-	innerParts := make([]string, 0, len(g.conds))
-	var allArgs []any
-	for _, c := range g.conds {
-		part, args, err := c.ToSql()
-		if err != nil {
-			return "", nil, err
-		}
-		if g.numeric {
-			part = strings.ReplaceAll(part, "value", "CAST(value AS REAL)")
-		}
-		innerParts = append(innerParts, part)
-		allArgs = append(allArgs, args...)
-	}
-	cond := fmt.Sprintf("exists (select 1 from json_tree(media_file.tags, '$.%s') where key='value' and (%s))",
-		g.tag, strings.Join(innerParts, " OR "))
-	if g.not {
-		cond = "not " + cond
-	}
-	return cond, allArgs, nil
+	return (tagCond{tag: g.tag, numeric: g.numeric, cond: squirrel.Or(g.conds), not: g.not}).ToSql()
 }
 
 func singleField(values map[string]any) (string, any, criteria.FieldInfo, bool) {
@@ -885,9 +870,9 @@ func sortExpr(sortField string) (string, bool) {
 	var mapped string
 	switch {
 	case info.IsTag:
-		mapped = "COALESCE(json_extract(media_file.tags, '$." + info.Name() + "[0].value'), '')"
+		mapped = "COALESCE(jsonb_extract_path_text(media_file.tags, '" + info.Name() + "', '0', 'value'), '')"
 	case info.IsRole:
-		mapped = "COALESCE(json_extract(media_file.participants, '$." + info.Name() + "[0].name'), '')"
+		mapped = "COALESCE(jsonb_extract_path_text(media_file.participants, '" + info.Name() + "', '0', 'name'), '')"
 	default:
 		field, ok := smartPlaylistFields[info.Name()]
 		if !ok || field.expr == "" {
@@ -898,7 +883,11 @@ func sortExpr(sortField string) (string, bool) {
 		mapped = field.coalesced()
 	}
 	if info.Numeric {
-		mapped = fmt.Sprintf("CAST(%s AS REAL)", mapped)
+		if info.IsTag {
+			mapped = fmt.Sprintf("(CASE WHEN %s ~ '^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$' THEN CAST(%s AS double precision) END)", mapped, mapped)
+		} else {
+			mapped = fmt.Sprintf("CAST(%s AS double precision)", mapped)
+		}
 	}
 	return mapped, true
 }

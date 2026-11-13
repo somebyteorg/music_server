@@ -5,16 +5,13 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
+	"math"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/dustin/go-humanize"
-	_ "github.com/mattn/go-sqlite3"
-	"github.com/navidrome/navidrome/conf"
 	"github.com/navidrome/navidrome/log"
 	"github.com/navidrome/navidrome/plugins/host"
 	"github.com/navidrome/navidrome/utils/slice"
@@ -26,21 +23,22 @@ const (
 )
 
 // notExpiredFilter is the SQL condition to exclude expired keys.
-const notExpiredFilter = "(expires_at IS NULL OR expires_at >= datetime('now'))"
+const notExpiredFilter = "(expires_at IS NULL OR expires_at >= CURRENT_TIMESTAMP)"
 
 const cleanupInterval = 1 * time.Hour
 
 // kvstoreServiceImpl implements the host.KVStoreService interface.
-// Each plugin gets its own SQLite database for isolation.
+// Rows are isolated by plugin id in the shared database.
 type kvstoreServiceImpl struct {
 	pluginName string
-	db         *sql.DB
+	db         *pluginDatabase
 	maxSize    int64
+	ctx        context.Context //nolint:containedctx // service lifecycle
 	cancel     context.CancelFunc
 	wg         sync.WaitGroup
 }
 
-// newKVStoreService creates a new kvstoreServiceImpl instance with its own SQLite database.
+// newKVStoreService creates a new kvstoreServiceImpl instance using the shared PostgreSQL pool.
 // The provided context controls the lifetime of the background cleanup goroutine.
 func newKVStoreService(ctx context.Context, pluginName string, perm *KVStorePermission) (*kvstoreServiceImpl, error) {
 	// Parse max size from permission, default to 1MB
@@ -50,38 +48,20 @@ func newKVStoreService(ctx context.Context, pluginName string, perm *KVStorePerm
 		if err != nil {
 			return nil, fmt.Errorf("invalid maxSize %q: %w", *perm.MaxSize, err)
 		}
+		if parsed > math.MaxInt64 {
+			return nil, fmt.Errorf("maxSize exceeds supported storage size")
+		}
 		maxSize = int64(parsed)
 	}
 
-	// Create plugin data directory
-	dataDir := filepath.Join(conf.Server.DataFolder.String(), "plugins", pluginName)
-	if err := os.MkdirAll(dataDir, 0700); err != nil {
-		return nil, fmt.Errorf("creating plugin data directory: %w", err)
-	}
-
-	// Open SQLite database
-	dbPath := filepath.Join(dataDir, "kvstore.db")
-	db, err := sql.Open("sqlite3", dbPath+"?_busy_timeout=5000&_journal_mode=WAL&_foreign_keys=off")
-	if err != nil {
-		return nil, fmt.Errorf("opening kvstore database: %w", err)
-	}
-
-	db.SetMaxOpenConns(3)
-	db.SetMaxIdleConns(1)
-
-	// Apply schema migrations
-	if err := createKVStoreSchema(db); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("migrating kvstore schema: %w", err)
-	}
-
-	log.Debug("Initialized plugin kvstore", "plugin", pluginName, "path", dbPath, "maxSize", humanize.Bytes(uint64(maxSize)))
+	database := newPluginDatabase(pluginName)
 
 	cleanupCtx, cancel := context.WithCancel(ctx)
 	svc := &kvstoreServiceImpl{
 		pluginName: pluginName,
-		db:         db,
+		db:         database,
 		maxSize:    maxSize,
+		ctx:        cleanupCtx,
 		cancel:     cancel,
 	}
 	svc.wg.Add(1)
@@ -89,26 +69,14 @@ func newKVStoreService(ctx context.Context, pluginName string, perm *KVStorePerm
 	return svc, nil
 }
 
-// createKVStoreSchema applies schema migrations to the kvstore database.
-// New migrations must be appended at the end of the slice.
-func createKVStoreSchema(db *sql.DB) error {
-	return migrateDB(db, []string{
-		`CREATE TABLE IF NOT EXISTS kvstore (
-			key TEXT PRIMARY KEY NOT NULL,
-			value BLOB NOT NULL,
-			size INTEGER NOT NULL,
-			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-		)`,
-		`ALTER TABLE kvstore ADD COLUMN expires_at DATETIME DEFAULT NULL`,
-		`CREATE INDEX idx_kvstore_expires_at ON kvstore(expires_at)`,
-	})
-}
-
 // storageUsed returns the current total storage used by non-expired keys.
 func (s *kvstoreServiceImpl) storageUsed(ctx context.Context) (int64, error) {
+	return kvStorageUsed(ctx, s.db)
+}
+
+func kvStorageUsed(ctx context.Context, database *pluginDatabase) (int64, error) {
 	var used int64
-	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(size), 0) FROM kvstore WHERE `+notExpiredFilter).Scan(&used)
+	err := database.QueryRowContext(ctx, `SELECT COALESCE(SUM(size), 0) FROM plugin_kvstore WHERE plugin_id = @plugin AND `+notExpiredFilter).Scan(&used)
 	if err != nil {
 		return 0, fmt.Errorf("calculating storage used: %w", err)
 	}
@@ -116,11 +84,11 @@ func (s *kvstoreServiceImpl) storageUsed(ctx context.Context) (int64, error) {
 }
 
 // checkStorageLimit verifies that adding delta bytes would not exceed the storage limit.
-func (s *kvstoreServiceImpl) checkStorageLimit(ctx context.Context, delta int64) error {
+func (s *kvstoreServiceImpl) checkStorageLimit(ctx context.Context, database *pluginDatabase, delta int64) error {
 	if delta <= 0 {
 		return nil
 	}
-	used, err := s.storageUsed(ctx)
+	used, err := kvStorageUsed(ctx, database)
 	if err != nil {
 		return err
 	}
@@ -135,6 +103,9 @@ func (s *kvstoreServiceImpl) checkStorageLimit(ctx context.Context, delta int64)
 // setValue is the shared implementation for Set and SetWithTTL.
 // A ttlSeconds of 0 means no expiration.
 func (s *kvstoreServiceImpl) setValue(ctx context.Context, key string, value []byte, ttlSeconds int64) error {
+	if err := s.ctx.Err(); err != nil {
+		return err
+	}
 	if len(key) == 0 {
 		return fmt.Errorf("key cannot be empty")
 	}
@@ -144,33 +115,36 @@ func (s *kvstoreServiceImpl) setValue(ctx context.Context, key string, value []b
 
 	newValueSize := int64(len(value))
 
-	// Get current size of this key (if it exists and not expired) to calculate delta
-	var oldSize int64
-	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(size, 0) FROM kvstore WHERE key = ? AND `+notExpiredFilter, key).Scan(&oldSize)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("checking existing key: %w", err)
+	if value == nil {
+		value = []byte{}
 	}
-
-	if err := s.checkStorageLimit(ctx, newValueSize-oldSize); err != nil {
+	err := s.db.transaction(ctx, func(database *pluginDatabase) error {
+		if _, err := database.ExecContext(ctx, "SELECT pg_advisory_xact_lock(hashtextextended(@plugin, 0))"); err != nil {
+			return err
+		}
+		var oldSize int64
+		err := database.QueryRowContext(ctx, `SELECT COALESCE(size, 0) FROM plugin_kvstore WHERE plugin_id = @plugin AND key = ? AND `+notExpiredFilter, key).Scan(&oldSize)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("checking existing key: %w", err)
+		}
+		if err := s.checkStorageLimit(ctx, database, newValueSize-oldSize); err != nil {
+			return err
+		}
+		var expiresAt any
+		if ttlSeconds > 0 {
+			if ttlSeconds > int64((1<<63-1)/int64(time.Second)) {
+				return fmt.Errorf("TTL exceeds supported duration")
+			}
+			expiresAt = time.Now().UTC().Add(time.Duration(ttlSeconds) * time.Second)
+		}
+		_, err = database.ExecContext(ctx, `
+            INSERT INTO plugin_kvstore (plugin_id, key, value, size, created_at, updated_at, expires_at)
+            VALUES (@plugin, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)
+            ON CONFLICT(plugin_id, key) DO UPDATE SET value = excluded.value, size = excluded.size,
+                updated_at = CURRENT_TIMESTAMP, expires_at = excluded.expires_at
+        `, key, value, newValueSize, expiresAt)
 		return err
-	}
-
-	// Compute expires_at: sql.NullString{Valid:false} sends NULL (no expiration),
-	// otherwise we send a concrete timestamp.
-	var expiresAt sql.NullString
-	if ttlSeconds > 0 {
-		expiresAt = sql.NullString{String: fmt.Sprintf("+%d seconds", ttlSeconds), Valid: true}
-	}
-
-	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO kvstore (key, value, size, created_at, updated_at, expires_at)
-		VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, datetime('now', ?))
-		ON CONFLICT(key) DO UPDATE SET
-			value = excluded.value,
-			size = excluded.size,
-			updated_at = CURRENT_TIMESTAMP,
-			expires_at = excluded.expires_at
-	`, key, value, newValueSize, expiresAt)
+	})
 	if err != nil {
 		return fmt.Errorf("storing value: %w", err)
 	}
@@ -194,8 +168,11 @@ func (s *kvstoreServiceImpl) SetWithTTL(ctx context.Context, key string, value [
 
 // Get retrieves a byte value from storage.
 func (s *kvstoreServiceImpl) Get(ctx context.Context, key string) ([]byte, bool, error) {
+	if err := s.ctx.Err(); err != nil {
+		return nil, false, err
+	}
 	var value []byte
-	err := s.db.QueryRowContext(ctx, `SELECT value FROM kvstore WHERE key = ? AND `+notExpiredFilter, key).Scan(&value)
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM plugin_kvstore WHERE plugin_id = @plugin AND key = ? AND `+notExpiredFilter, key).Scan(&value)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, false, nil
 	}
@@ -209,7 +186,10 @@ func (s *kvstoreServiceImpl) Get(ctx context.Context, key string) ([]byte, bool,
 
 // Delete removes a value from storage.
 func (s *kvstoreServiceImpl) Delete(ctx context.Context, key string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM kvstore WHERE key = ?`, key)
+	if err := s.ctx.Err(); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `DELETE FROM plugin_kvstore WHERE plugin_id = @plugin AND key = ?`, key)
 	if err != nil {
 		return fmt.Errorf("deleting value: %w", err)
 	}
@@ -220,8 +200,11 @@ func (s *kvstoreServiceImpl) Delete(ctx context.Context, key string) error {
 
 // Has checks if a key exists in storage.
 func (s *kvstoreServiceImpl) Has(ctx context.Context, key string) (bool, error) {
+	if err := s.ctx.Err(); err != nil {
+		return false, err
+	}
 	var count int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM kvstore WHERE key = ? AND `+notExpiredFilter, key).Scan(&count)
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM plugin_kvstore WHERE plugin_id = @plugin AND key = ? AND `+notExpiredFilter, key).Scan(&count)
 	if err != nil {
 		return false, fmt.Errorf("checking key: %w", err)
 	}
@@ -231,16 +214,16 @@ func (s *kvstoreServiceImpl) Has(ctx context.Context, key string) (bool, error) 
 
 // List returns all keys matching the given prefix.
 func (s *kvstoreServiceImpl) List(ctx context.Context, prefix string) ([]string, error) {
+	if err := s.ctx.Err(); err != nil {
+		return nil, err
+	}
 	var rows *sql.Rows
 	var err error
 
 	if prefix == "" {
-		rows, err = s.db.QueryContext(ctx, `SELECT key FROM kvstore WHERE `+notExpiredFilter+` ORDER BY key`)
+		rows, err = s.db.QueryContext(ctx, `SELECT key FROM plugin_kvstore WHERE plugin_id = @plugin AND `+notExpiredFilter+` ORDER BY key`)
 	} else {
-		// Escape special LIKE characters in prefix
-		escapedPrefix := strings.ReplaceAll(prefix, "%", "\\%")
-		escapedPrefix = strings.ReplaceAll(escapedPrefix, "_", "\\_")
-		rows, err = s.db.QueryContext(ctx, `SELECT key FROM kvstore WHERE key LIKE ? ESCAPE '\' AND `+notExpiredFilter+` ORDER BY key`, escapedPrefix+"%")
+		rows, err = s.db.QueryContext(ctx, `SELECT key FROM plugin_kvstore WHERE plugin_id = @plugin AND starts_with(key, ?) AND `+notExpiredFilter+` ORDER BY key`, prefix)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("listing keys: %w", err)
@@ -266,6 +249,9 @@ func (s *kvstoreServiceImpl) List(ctx context.Context, prefix string) ([]string,
 
 // GetStorageUsed returns the total storage used by this plugin in bytes.
 func (s *kvstoreServiceImpl) GetStorageUsed(ctx context.Context) (int64, error) {
+	if err := s.ctx.Err(); err != nil {
+		return 0, err
+	}
 	used, err := s.storageUsed(ctx)
 	if err != nil {
 		return 0, err
@@ -276,13 +262,14 @@ func (s *kvstoreServiceImpl) GetStorageUsed(ctx context.Context) (int64, error) 
 
 // DeleteByPrefix removes all keys matching the given prefix.
 func (s *kvstoreServiceImpl) DeleteByPrefix(ctx context.Context, prefix string) (int64, error) {
+	if err := s.ctx.Err(); err != nil {
+		return 0, err
+	}
 	if prefix == "" {
 		return 0, fmt.Errorf("prefix cannot be empty")
 	}
 
-	escapedPrefix := strings.ReplaceAll(prefix, "%", "\\%")
-	escapedPrefix = strings.ReplaceAll(escapedPrefix, "_", "\\_")
-	result, err := s.db.ExecContext(ctx, `DELETE FROM kvstore WHERE key LIKE ? ESCAPE '\'`, escapedPrefix+"%")
+	result, err := s.db.ExecContext(ctx, `DELETE FROM plugin_kvstore WHERE plugin_id = @plugin AND starts_with(key, ?)`, prefix)
 	if err != nil {
 		return 0, fmt.Errorf("deleting keys: %w", err)
 	}
@@ -298,6 +285,9 @@ func (s *kvstoreServiceImpl) DeleteByPrefix(ctx context.Context, prefix string) 
 
 // GetMany retrieves multiple values in a single call, processing keys in batches.
 func (s *kvstoreServiceImpl) GetMany(ctx context.Context, keys []string) (map[string][]byte, error) {
+	if err := s.ctx.Err(); err != nil {
+		return nil, err
+	}
 	if len(keys) == 0 {
 		return map[string][]byte{}, nil
 	}
@@ -312,7 +302,7 @@ func (s *kvstoreServiceImpl) GetMany(ctx context.Context, keys []string) (map[st
 			args[i] = key
 		}
 
-		query := `SELECT key, value FROM kvstore WHERE key IN (` + strings.Join(placeholders, ",") + `) AND ` + notExpiredFilter //nolint:gosec // placeholders are always "?"
+		query := `SELECT key, value FROM plugin_kvstore WHERE plugin_id = @plugin AND key IN (` + strings.Join(placeholders, ",") + `) AND ` + notExpiredFilter //nolint:gosec // placeholders are always "?"
 		rows, err := s.db.QueryContext(ctx, query, args...)
 		if err != nil {
 			return nil, fmt.Errorf("querying values: %w", err)
@@ -356,7 +346,7 @@ func (s *kvstoreServiceImpl) cleanupLoop(ctx context.Context) {
 
 // cleanupExpired removes all expired keys from the database to reclaim disk space.
 func (s *kvstoreServiceImpl) cleanupExpired(ctx context.Context) {
-	result, err := s.db.ExecContext(ctx, `DELETE FROM kvstore WHERE expires_at IS NOT NULL AND expires_at < datetime('now')`)
+	result, err := s.db.ExecContext(ctx, `DELETE FROM plugin_kvstore WHERE plugin_id = @plugin AND expires_at IS NOT NULL AND expires_at < CURRENT_TIMESTAMP`)
 	if err != nil {
 		log.Error(ctx, "KVStore cleanup: failed to delete expired keys", "plugin", s.pluginName, err)
 		return
@@ -366,12 +356,12 @@ func (s *kvstoreServiceImpl) cleanupExpired(ctx context.Context) {
 	}
 }
 
-// Close stops the cleanup goroutine and closes the SQLite database connection.
+// Close stops the cleanup goroutine without closing the shared PostgreSQL pool.
 func (s *kvstoreServiceImpl) Close() error {
 	log.Debug("Closing plugin kvstore", "plugin", s.pluginName)
 	s.cancel()
 	s.wg.Wait()
-	return s.db.Close()
+	return nil
 }
 
 // Compile-time verification

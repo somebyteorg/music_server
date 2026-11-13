@@ -56,7 +56,7 @@ func (r *scrobbleBufferRepository) Enqueue(ctx context.Context, service, userId,
 		"service":       service,
 		"media_file_id": mediaFileId,
 		"play_time":     playTime,
-		"enqueue_time":  time.Now(),
+		"enqueue_time":  databaseNow(),
 	})
 	_, err := r.executeSQL(ctx, ins)
 	return err
@@ -71,7 +71,7 @@ func (r *scrobbleBufferRepository) Next(ctx context.Context, service string, use
 			Eq{"service": service},
 			Eq{"user_id": userId},
 		}).
-		OrderBy("play_time", "s.rowid").Limit(1)
+		OrderBy("play_time", "s.id").Limit(1)
 
 	var res dbScrobbleBuffer
 	err := r.queryOne(ctx, sql, &res)

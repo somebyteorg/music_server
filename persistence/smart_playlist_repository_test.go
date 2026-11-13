@@ -692,15 +692,13 @@ var _ = Describe("PlaylistRepository - Smart Playlists", func() {
 			uniqueLibPath = "/music/lib2-" + uniqueSuffix
 
 			// Create a second library with unique name and path to avoid conflicts with other tests
-			_, err := db.DB().Exec("INSERT INTO library (name, path, created_at, updated_at) VALUES (?, ?, datetime('now'), datetime('now'))", "Library 2-"+uniqueSuffix, uniqueLibPath)
-			Expect(err).ToNot(HaveOccurred())
-			err = db.DB().QueryRow("SELECT last_insert_rowid()").Scan(&lib2ID)
+			err := db.DB().QueryRow("INSERT INTO library (name, path, created_at, updated_at) VALUES ($1, $2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) RETURNING id", "Library 2-"+uniqueSuffix, uniqueLibPath).Scan(&lib2ID)
 			Expect(err).ToNot(HaveOccurred())
 
 			// Create a restricted user with access only to library 1
-			_, err = db.DB().Exec("INSERT INTO user (id, user_name, name, is_admin, password, created_at, updated_at) VALUES (?, ?, 'Restricted User', false, 'pass', datetime('now'), datetime('now'))", restrictedUserID, restrictedUserID)
+			_, err = db.DB().Exec("INSERT INTO app_user (id, user_name, name, is_admin, password, created_at, updated_at) VALUES ($1, $2, 'Restricted User', false, 'pass', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", restrictedUserID, restrictedUserID)
 			Expect(err).ToNot(HaveOccurred())
-			_, err = db.DB().Exec("INSERT INTO user_library (user_id, library_id) VALUES (?, 1)", restrictedUserID)
+			_, err = db.DB().Exec("INSERT INTO user_library (user_id, library_id) VALUES ($1, 1)", restrictedUserID)
 			Expect(err).ToNot(HaveOccurred())
 
 			// Create test media files in each library
@@ -751,8 +749,8 @@ var _ = Describe("PlaylistRepository - Smart Playlists", func() {
 			_, _ = db.Delete("media_file", dbx.HashExp{"id": "lib1-song"}).Execute()
 			_, _ = db.Delete("media_file", dbx.HashExp{"id": "lib2-song"}).Execute()
 			_, _ = db.Delete("user_library", dbx.HashExp{"user_id": restrictedUserID}).Execute()
-			_, _ = db.Delete("user", dbx.HashExp{"id": restrictedUserID}).Execute()
-			_, _ = db.DB().Exec("DELETE FROM library WHERE id = ?", lib2ID)
+			_, _ = db.Delete("app_user", dbx.HashExp{"id": restrictedUserID}).Execute()
+			_, _ = db.DB().Exec("DELETE FROM library WHERE id = $1", lib2ID)
 		})
 
 		It("should only include tracks from libraries the user has access to (issue #4738)", func() {
@@ -794,12 +792,12 @@ var _ = Describe("PlaylistRepository - Smart Playlists", func() {
 
 			By("verifying playlist_tracks table only contains the accessible track")
 			var playlistTracksCount int
-			err = db.DB().QueryRow("SELECT count(*) FROM playlist_tracks WHERE playlist_id = ?", newPls.ID).Scan(&playlistTracksCount)
+			err = db.DB().QueryRow("SELECT count(*) FROM playlist_tracks WHERE playlist_id = $1", newPls.ID).Scan(&playlistTracksCount)
 			Expect(err).ToNot(HaveOccurred())
 			// Count should only include tracks visible to the user (lib1-song)
 			// The count may include other test songs from library 1, but NOT lib2-song
 			var lib2TrackCount int
-			err = db.DB().QueryRow("SELECT count(*) FROM playlist_tracks WHERE playlist_id = ? AND media_file_id = 'lib2-song'", newPls.ID).Scan(&lib2TrackCount)
+			err = db.DB().QueryRow("SELECT count(*) FROM playlist_tracks WHERE playlist_id = $1 AND media_file_id = 'lib2-song'", newPls.ID).Scan(&lib2TrackCount)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(lib2TrackCount).To(Equal(0), "lib2-song should not be in playlist_tracks")
 

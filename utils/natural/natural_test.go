@@ -140,9 +140,9 @@ var _ = Describe("CompareFold", func() {
 		Entry("non-ASCII is left untouched", "café 2", "café 10", -1),
 	)
 
-	// SQLite requires a collating function to be transitive; if it is not, the behavior of
+	// A sorting comparator must be transitive; otherwise the behavior of
 	// ORDER BY is undefined and paginated queries can drop or duplicate rows.
-	It("is transitive, as a SQLite collation requires", func() {
+	It("is transitive", func() {
 		var corpus []string
 		var build func(prefix string, depth int)
 		build = func(prefix string, depth int) {

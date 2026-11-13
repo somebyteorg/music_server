@@ -182,8 +182,19 @@ func (r *mediaFileRepository) Exists(ctx context.Context, id string) (bool, erro
 }
 
 func (r *mediaFileRepository) Put(ctx context.Context, m *model.MediaFile) error {
+	return r.withTx(ctx, func(base sqlRepository) error {
+		scoped := *r
+		scoped.sqlRepository = base
+		return scoped.putMediaFile(ctx, m)
+	})
+}
+
+func (r *mediaFileRepository) putMediaFile(ctx context.Context, m *model.MediaFile) error {
+	if strings.TrimSpace(m.Lyrics) == "" {
+		m.Lyrics = "[]"
+	}
 	if m.CreatedAt.IsZero() {
-		m.CreatedAt = time.Now()
+		m.CreatedAt = databaseNow()
 	}
 	id, err := r.putByMatch(ctx, Eq{"path": m.Path, "library_id": m.LibraryID}, m.ID, &dbMediaFile{MediaFile: m})
 	if err != nil {
@@ -232,7 +243,7 @@ func (r *mediaFileRepository) GetWithParticipants(ctx context.Context, id string
 func (r *mediaFileRepository) GetAll(ctx context.Context, options ...model.QueryOptions) (model.MediaFiles, error) {
 	sq := r.selectMediaFile(ctx, options...)
 	var res dbMediaFiles
-	err := r.queryAll(ctx, sq, &res, options...)
+	err := r.queryAll(ctx, sq, &res)
 	if err != nil {
 		return nil, err
 	}
@@ -245,33 +256,31 @@ func (r *mediaFileRepository) hydrateArtwork(ctx context.Context, mfs model.Medi
 	hydrateMediaFileArtwork(ctx, r.db, mfs)
 }
 
-// GetRandom uses two passes so the random sort runs over a narrow rowid index instead of the
-// wide media_file row: pick random rowids first, then hydrate only those.
+// GetRandom selects primary keys first and hydrates only the sampled tracks.
 func (r *mediaFileRepository) GetRandom(ctx context.Context, options ...model.QueryOptions) (model.MediaFiles, error) {
 	var opt model.QueryOptions
 	if len(options) > 0 {
 		opt = options[0]
 	}
 
-	rowidQuery := Select("media_file.rowid").From(r.tableName)
-	rowidQuery = r.applyFilters(rowidQuery, model.QueryOptions{Filters: opt.Filters})
-	rowidQuery = r.applyLibraryFilter(ctx, rowidQuery)
-	rowidQuery = rowidQuery.OrderBy("random()")
+	idQuery := Select("media_file.id").From(r.tableName)
+	idQuery = r.applyFilters(idQuery, model.QueryOptions{Filters: opt.Filters})
+	idQuery = r.applyLibraryFilter(ctx, idQuery)
+	idQuery = idQuery.OrderBy("random()")
 	if opt.Max > 0 {
-		rowidQuery = rowidQuery.Limit(uint64(opt.Max))
+		idQuery = idQuery.Limit(uint64(opt.Max))
 	}
 
-	var rowids []int64
-	if err := r.queryAllSlice(ctx, rowidQuery, &rowids); err != nil {
+	var ids []string
+	if err := r.queryAllSlice(ctx, idQuery, &ids); err != nil {
 		return nil, err
 	}
-	if len(rowids) == 0 {
+	if len(ids) == 0 {
 		return model.MediaFiles{}, nil
 	}
 
-	// Re-shuffle in Phase 2: `WHERE rowid IN (...)` returns rows in ascending rowid order, not
-	// the random order from Phase 1. Sorting only the (<=Max) hydrated rows is negligible.
-	sq := r.selectMediaFile(ctx).Where(Eq{"media_file.rowid": rowids}).OrderBy("random()")
+	// Apply the random order to the small set of hydrated rows.
+	sq := r.selectMediaFile(ctx).Where(Eq{"media_file.id": ids}).OrderBy("random()")
 	var res dbMediaFiles
 	if err := r.queryAll(ctx, sq, &res); err != nil {
 		return nil, err
@@ -282,17 +291,7 @@ func (r *mediaFileRepository) GetRandom(ctx context.Context, options ...model.Qu
 }
 
 func (r *mediaFileRepository) GetAllByTags(ctx context.Context, tag model.TagName, values []string, options ...model.QueryOptions) (model.MediaFiles, error) {
-	placeholders := make([]string, len(values))
-	args := make([]any, len(values))
-	for i, v := range values {
-		placeholders[i] = "?"
-		args[i] = v
-	}
-	tagFilter := Expr(
-		fmt.Sprintf("exists (select 1 from json_tree(media_file.tags, '$.%s') where key='value' and value in (%s))",
-			tag, strings.Join(placeholders, ",")),
-		args...,
-	)
+	tagFilter := TagFilter("media_file.tags", tag.String(), Eq{"value": values})
 
 	var opts model.QueryOptions
 	if len(options) > 0 {
@@ -308,22 +307,11 @@ func (r *mediaFileRepository) GetAllByTags(ctx context.Context, tag model.TagNam
 
 func (r *mediaFileRepository) GetCursor(ctx context.Context, options ...model.QueryOptions) (model.MediaFileCursor, error) {
 	sq := r.selectMediaFile(ctx, options...)
-	cursor, err := queryWithStableResults[dbMediaFile](ctx, r.sqlRepository, sq)
+	cursor, err := queryCursor[dbMediaFile](ctx, r.sqlRepository, sq)
 	if err != nil {
 		return nil, err
 	}
 	return wrapMediaFileCursor(cursor), nil
-}
-
-// getAllIDs returns the IDs of GetAll's row set, skipping its wide column projection.
-func (r *mediaFileRepository) getAllIDs(ctx context.Context, options ...model.QueryOptions) ([]string, error) {
-	sq := r.applyLibraryFilter(ctx, r.newSelect(ctx, options...).Columns("media_file.id"))
-	if filtersNeedAnnotation(sq) {
-		sq = r.withAnnotation(ctx, sq, "media_file.id")
-	}
-	ids := []string{}
-	err := r.queryAllSlice(ctx, sq, &ids)
-	return ids, err
 }
 
 func (r *mediaFileRepository) GetAlbumIDsByFolder(ctx context.Context, lib model.Library, folderIDs ...string) ([]string, error) {
@@ -346,15 +334,14 @@ func (r *mediaFileRepository) GetAlbumIDsByFolder(ctx context.Context, lib model
 	return ids, nil
 }
 
-// GetCursorWithArtwork streams the same rows as GetCursor, hydrated, via an id pre-pass.
+// GetCursorWithArtwork hydrates only the current page of the seek cursor.
 func (r *mediaFileRepository) GetCursorWithArtwork(ctx context.Context, options ...model.QueryOptions) (model.MediaFileCursor, error) {
-	ids, err := r.getAllIDs(ctx, options...)
+	cursor, err := r.GetCursor(ctx, options...)
 	if err != nil {
 		return nil, err
 	}
-	opts := chunkOptions(options, "media_file.id")
-	return model.MediaFileCursor(streamByIDs(ids, func(chunk []string) (model.MediaFiles, error) {
-		return r.GetAll(ctx, opts(chunk))
+	return model.MediaFileCursor(hydrateCursor(iter.Seq2[model.MediaFile, error](cursor), func(batch []model.MediaFile) {
+		r.hydrateArtwork(ctx, batch)
 	})), nil
 }
 
@@ -363,8 +350,7 @@ func (r *mediaFileRepository) GetCursorWithArtwork(ctx context.Context, options 
 // Library-qualified paths search within the specified library, while unqualified paths
 // search across all libraries for backward compatibility.
 func (r *mediaFileRepository) FindByPaths(ctx context.Context, paths []string) (model.MediaFiles, error) {
-	// One IN list per library instead of one OR term per path: SQLite abandons the
-	// path index at just two OR-ed equality terms and scans the whole table.
+	// Group lookups by library to keep large path queries compact.
 	byLibrary := map[int][]string{}
 	var unqualified []string
 
@@ -382,12 +368,12 @@ func (r *mediaFileRepository) FindByPaths(ctx context.Context, paths []string) (
 	query := Or{}
 	for _, libraryID := range slices.Sorted(maps.Keys(byLibrary)) {
 		query = append(query, And{
-			Eq{"path collate nocase": byLibrary[libraryID]},
+			Eq{"lower(path)": slice.Map(byLibrary[libraryID], strings.ToLower)},
 			Eq{"library_id": libraryID},
 		})
 	}
 	if len(unqualified) > 0 {
-		query = append(query, Eq{"path collate nocase": unqualified})
+		query = append(query, Eq{"lower(path)": slice.Map(unqualified, strings.ToLower)})
 	}
 
 	if len(query) == 0 {
@@ -408,6 +394,14 @@ func (r *mediaFileRepository) Delete(ctx context.Context, id string) error {
 }
 
 func (r *mediaFileRepository) ReassignReferences(ctx context.Context, prevID, newID string) error {
+	return r.withTx(ctx, func(base sqlRepository) error {
+		scoped := *r
+		scoped.sqlRepository = base
+		return scoped.reassignReferences(ctx, prevID, newID)
+	})
+}
+
+func (r *mediaFileRepository) reassignReferences(ctx context.Context, prevID, newID string) error {
 	if err := r.ReassignAnnotation(ctx, prevID, newID); err != nil {
 		return fmt.Errorf("reassigning annotations: %w", err)
 	}
@@ -423,7 +417,12 @@ func (r *mediaFileRepository) ReassignReferences(ctx context.Context, prevID, ne
 		return fmt.Errorf("reassigning scrobbles: %w", err)
 	}
 	// OR IGNORE: scrobble_buffer is unique on (user_id, service, media_file_id, play_time)
-	buf := Expr("update or ignore scrobble_buffer set media_file_id = ? where media_file_id = ?", newID, prevID)
+	buf := Expr(`UPDATE scrobble_buffer AS source SET media_file_id = ?
+        WHERE source.media_file_id = ? AND NOT EXISTS (
+            SELECT 1 FROM scrobble_buffer AS target
+            WHERE target.media_file_id = ? AND target.user_id = source.user_id
+              AND target.service = source.service AND target.play_time = source.play_time
+        )`, newID, prevID, newID)
 	if _, err := r.executeSQL(ctx, buf); err != nil {
 		return fmt.Errorf("reassigning buffered scrobbles: %w", err)
 	}
@@ -457,7 +456,7 @@ func (r *mediaFileRepository) MarkMissing(ctx context.Context, missing bool, mfs
 	for chunk := range slice.CollectChunks(ids, 200) {
 		upd := Update(r.tableName).
 			Set("missing", missing).
-			Set("updated_at", time.Now()).
+			Set("updated_at", databaseNow()).
 			Where(Eq{"id": chunk})
 		c, err := r.executeSQL(ctx, upd)
 		if err != nil || c == 0 {
@@ -473,7 +472,7 @@ func (r *mediaFileRepository) MarkMissingByFolder(ctx context.Context, missing b
 	for chunk := range slices.Chunk(folderIDs, 200) {
 		upd := Update(r.tableName).
 			Set("missing", missing).
-			Set("updated_at", time.Now()).
+			Set("updated_at", databaseNow()).
 			Where(And{
 				Eq{"folder_id": chunk},
 				Eq{"missing": !missing},
@@ -509,7 +508,7 @@ func (r *mediaFileRepository) GetMissingAndMatching(ctx context.Context, libId i
 			ConcatExpr("media_file.created_at > library.last_scan_started_at"),
 		}).
 		OrderBy("pid")
-	cursor, err := queryWithStableResults[dbMediaFile](ctx, r.sqlRepository, sel)
+	cursor, err := queryCursor[dbMediaFile](ctx, r.sqlRepository, sel)
 	if err != nil {
 		return nil, err
 	}
@@ -569,7 +568,7 @@ func (r *mediaFileRepository) FindRecentFilesByProperties(ctx context.Context, m
 }
 
 var mediaFileSearchConfig = searchConfig{
-	NaturalOrder: "media_file.rowid",
+	NaturalOrder: "media_file.id",
 	OrderBy:      []string{"title"},
 	MBIDFields:   []string{"mbz_recording_id", "mbz_release_track_id"},
 }
@@ -592,12 +591,9 @@ func (r *mediaFileRepository) MatchesCriteria(ctx context.Context, id string, c 
 }
 
 func (r *mediaFileRepository) Search(ctx context.Context, q string, options ...model.QueryOptions) (model.MediaFiles, error) {
-	var opts model.QueryOptions
-	if len(options) > 0 {
-		opts = options[0]
-	}
+
 	var res dbMediaFiles
-	err := r.doSearch(ctx, r.selectMediaFile(ctx, options...), q, &res, mediaFileSearchConfig, opts)
+	err := r.doSearch(ctx, r.selectMediaFile(ctx, options...), q, &res, mediaFileSearchConfig)
 	if err != nil {
 		return nil, fmt.Errorf("searching media_file %q: %w", q, err)
 	}

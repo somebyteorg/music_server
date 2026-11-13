@@ -14,6 +14,7 @@ import (
 
 	"github.com/navidrome/navidrome/conf"
 	"github.com/navidrome/navidrome/conf/configtest"
+	"github.com/navidrome/navidrome/db"
 	"github.com/navidrome/navidrome/model"
 	"github.com/navidrome/navidrome/tests"
 	. "github.com/onsi/ginkgo/v2"
@@ -27,6 +28,7 @@ var _ = Describe("KVStoreService", func() {
 
 	BeforeEach(func() {
 		ctx = GinkgoT().Context()
+		setupPluginStorage(ctx)
 		var err error
 		tmpDir, err = os.MkdirTemp("", "kvstore-test-*")
 		Expect(err).ToNot(HaveOccurred())
@@ -317,35 +319,25 @@ var _ = Describe("KVStoreService", func() {
 			Expect(val2).To(Equal([]byte("value2")))
 		})
 
-		It("creates separate database files per plugin", func() {
-			service2, err := newKVStoreService(ctx, "other_plugin", &KVStorePermission{})
-			Expect(err).ToNot(HaveOccurred())
-			defer service2.Close()
-
-			// Check that separate directories exist
-			_, err = os.Stat(filepath.Join(tmpDir, "plugins", "test_plugin", "kvstore.db"))
-			Expect(err).ToNot(HaveOccurred())
-			_, err = os.Stat(filepath.Join(tmpDir, "plugins", "other_plugin", "kvstore.db"))
-			Expect(err).ToNot(HaveOccurred())
-		})
 	})
 
 	Describe("Close", func() {
-		It("closes database connection", func() {
+		It("rejects operations after closing without closing the shared pool", func() {
 			err := service.Close()
 			Expect(err).ToNot(HaveOccurred())
 
-			// After close, operations should fail
 			_, _, err = service.Get(ctx, "any")
 			Expect(err).To(HaveOccurred())
+			_, err = service.db.ExecContext(ctx, `SELECT 1 WHERE CAST(@plugin AS text) IS NOT NULL`)
+			Expect(err).ToNot(HaveOccurred())
 		})
 	})
 
 	Describe("TTL Expiration", func() {
 		It("Get returns not-exists for expired keys", func() {
-			_, err := service.db.Exec(`
-				INSERT INTO kvstore (key, value, size, expires_at)
-				VALUES ('expired_key', 'old', 3, datetime('now', '-1 seconds'))
+			_, err := service.db.ExecContext(ctx, `
+				INSERT INTO plugin_kvstore (plugin_id, key, value, size, expires_at)
+				VALUES (@plugin, 'expired_key', 'old', 3, CURRENT_TIMESTAMP - INTERVAL '1 second')
 			`)
 			Expect(err).ToNot(HaveOccurred())
 			value, exists, err := service.Get(ctx, "expired_key")
@@ -354,9 +346,9 @@ var _ = Describe("KVStoreService", func() {
 			Expect(value).To(BeNil())
 		})
 		It("Has returns false for expired keys", func() {
-			_, err := service.db.Exec(`
-				INSERT INTO kvstore (key, value, size, expires_at)
-				VALUES ('expired_has', 'old', 3, datetime('now', '-1 seconds'))
+			_, err := service.db.ExecContext(ctx, `
+				INSERT INTO plugin_kvstore (plugin_id, key, value, size, expires_at)
+				VALUES (@plugin, 'expired_has', 'old', 3, CURRENT_TIMESTAMP - INTERVAL '1 second')
 			`)
 			Expect(err).ToNot(HaveOccurred())
 			exists, err := service.Has(ctx, "expired_has")
@@ -365,9 +357,9 @@ var _ = Describe("KVStoreService", func() {
 		})
 		It("List excludes expired keys", func() {
 			Expect(service.Set(ctx, "live:1", []byte("alive"))).To(Succeed())
-			_, err := service.db.Exec(`
-				INSERT INTO kvstore (key, value, size, expires_at)
-				VALUES ('live:expired', 'dead', 4, datetime('now', '-1 seconds'))
+			_, err := service.db.ExecContext(ctx, `
+				INSERT INTO plugin_kvstore (plugin_id, key, value, size, expires_at)
+				VALUES (@plugin, 'live:expired', 'dead', 4, CURRENT_TIMESTAMP - INTERVAL '1 second')
 			`)
 			Expect(err).ToNot(HaveOccurred())
 			keys, err := service.List(ctx, "live:")
@@ -376,9 +368,9 @@ var _ = Describe("KVStoreService", func() {
 			Expect(keys).To(ContainElement("live:1"))
 		})
 		It("Get returns value for non-expired keys with TTL", func() {
-			_, err := service.db.Exec(`
-				INSERT INTO kvstore (key, value, size, expires_at)
-				VALUES ('future_key', 'still alive', 11, datetime('now', '+3600 seconds'))
+			_, err := service.db.ExecContext(ctx, `
+				INSERT INTO plugin_kvstore (plugin_id, key, value, size, expires_at)
+				VALUES (@plugin, 'future_key', 'still alive', 11, CURRENT_TIMESTAMP + INTERVAL '1 hour')
 			`)
 			Expect(err).ToNot(HaveOccurred())
 			value, exists, err := service.Get(ctx, "future_key")
@@ -388,9 +380,9 @@ var _ = Describe("KVStoreService", func() {
 		})
 		It("Set clears expires_at from a key previously set with TTL", func() {
 			// Insert a key with a TTL that has already expired
-			_, err := service.db.Exec(`
-				INSERT INTO kvstore (key, value, size, expires_at)
-				VALUES ('ttl_then_set', 'temp', 4, datetime('now', '-1 seconds'))
+			_, err := service.db.ExecContext(ctx, `
+				INSERT INTO plugin_kvstore (plugin_id, key, value, size, expires_at)
+				VALUES (@plugin, 'ttl_then_set', 'temp', 4, CURRENT_TIMESTAMP - INTERVAL '1 second')
 			`)
 			Expect(err).ToNot(HaveOccurred())
 
@@ -406,13 +398,13 @@ var _ = Describe("KVStoreService", func() {
 
 			// Verify expires_at is actually NULL
 			var expiresAt *string
-			Expect(service.db.QueryRow(`SELECT expires_at FROM kvstore WHERE key = 'ttl_then_set'`).Scan(&expiresAt)).To(Succeed())
+			Expect(service.db.QueryRowContext(ctx, `SELECT expires_at FROM plugin_kvstore WHERE plugin_id = @plugin AND key = 'ttl_then_set'`).Scan(&expiresAt)).To(Succeed())
 			Expect(expiresAt).To(BeNil())
 		})
 		It("expired keys are not counted in storage used", func() {
-			_, err := service.db.Exec(`
-				INSERT INTO kvstore (key, value, size, expires_at)
-				VALUES ('expired_key', '12345', 5, datetime('now', '-1 seconds'))
+			_, err := service.db.ExecContext(ctx, `
+				INSERT INTO plugin_kvstore (plugin_id, key, value, size, expires_at)
+				VALUES (@plugin, 'expired_key', '12345', 5, CURRENT_TIMESTAMP - INTERVAL '1 second')
 			`)
 			Expect(err).ToNot(HaveOccurred())
 
@@ -422,21 +414,21 @@ var _ = Describe("KVStoreService", func() {
 			Expect(used).To(Equal(int64(0)))
 		})
 		It("cleanup removes expired rows from disk", func() {
-			_, err := service.db.Exec(`
-				INSERT INTO kvstore (key, value, size, expires_at)
-				VALUES ('cleanup_me', '12345', 5, datetime('now', '-1 seconds'))
+			_, err := service.db.ExecContext(ctx, `
+				INSERT INTO plugin_kvstore (plugin_id, key, value, size, expires_at)
+				VALUES (@plugin, 'cleanup_me', '12345', 5, CURRENT_TIMESTAMP - INTERVAL '1 second')
 			`)
 			Expect(err).ToNot(HaveOccurred())
 
 			// Row exists in DB but is logically expired
 			var count int
-			Expect(service.db.QueryRow(`SELECT COUNT(*) FROM kvstore`).Scan(&count)).To(Succeed())
+			Expect(service.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM plugin_kvstore WHERE plugin_id = @plugin`).Scan(&count)).To(Succeed())
 			Expect(count).To(Equal(1))
 
 			service.cleanupExpired(ctx)
 
 			// Row should be physically deleted
-			Expect(service.db.QueryRow(`SELECT COUNT(*) FROM kvstore`).Scan(&count)).To(Succeed())
+			Expect(service.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM plugin_kvstore WHERE plugin_id = @plugin`).Scan(&count)).To(Succeed())
 			Expect(count).To(Equal(0))
 		})
 	})
@@ -452,9 +444,9 @@ var _ = Describe("KVStoreService", func() {
 			Expect(err).ToNot(HaveOccurred())
 
 			// Insert an expired key so cleanup has work to do
-			_, err = svc.db.Exec(`
-				INSERT INTO kvstore (key, value, size, expires_at)
-				VALUES ('cleanup_race', 'old', 3, datetime('now', '-1 seconds'))
+			_, err = svc.db.ExecContext(ctx, `
+				INSERT INTO plugin_kvstore (plugin_id, key, value, size, expires_at)
+				VALUES (@plugin, 'cleanup_race', 'old', 3, CURRENT_TIMESTAMP - INTERVAL '1 second')
 			`)
 			Expect(err).ToNot(HaveOccurred())
 
@@ -463,10 +455,9 @@ var _ = Describe("KVStoreService", func() {
 			err = svc.Close()
 			Expect(err).ToNot(HaveOccurred())
 
-			// Verify the database is actually closed (further queries should fail)
-			_, err = svc.db.Exec(`SELECT 1`)
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("database is closed"))
+			// The shared pool remains available after the service stops.
+			_, err = svc.db.ExecContext(ctx, `SELECT 1 WHERE CAST(@plugin AS text) IS NOT NULL`)
+			Expect(err).ToNot(HaveOccurred())
 		})
 	})
 
@@ -483,9 +474,9 @@ var _ = Describe("KVStoreService", func() {
 
 		It("value is not retrievable after expiry", func() {
 			// Insert a key with an already-expired TTL
-			_, err := service.db.Exec(`
-				INSERT INTO kvstore (key, value, size, expires_at)
-				VALUES ('short_ttl', 'gone_soon', 9, datetime('now', '-1 seconds'))
+			_, err := service.db.ExecContext(ctx, `
+				INSERT INTO plugin_kvstore (plugin_id, key, value, size, expires_at)
+				VALUES (@plugin, 'short_ttl', 'gone_soon', 9, CURRENT_TIMESTAMP - INTERVAL '1 second')
 			`)
 			Expect(err).ToNot(HaveOccurred())
 
@@ -519,9 +510,9 @@ var _ = Describe("KVStoreService", func() {
 
 		It("overwrites existing key and updates TTL", func() {
 			// Insert a key with an already-expired TTL
-			_, err := service.db.Exec(`
-				INSERT INTO kvstore (key, value, size, expires_at)
-				VALUES ('overwrite_ttl', 'first', 5, datetime('now', '-1 seconds'))
+			_, err := service.db.ExecContext(ctx, `
+				INSERT INTO plugin_kvstore (plugin_id, key, value, size, expires_at)
+				VALUES (@plugin, 'overwrite_ttl', 'first', 5, CURRENT_TIMESTAMP - INTERVAL '1 second')
 			`)
 			Expect(err).ToNot(HaveOccurred())
 
@@ -603,9 +594,9 @@ var _ = Describe("KVStoreService", func() {
 		})
 
 		It("also deletes expired keys matching prefix", func() {
-			_, err := service.db.Exec(`
-				INSERT INTO kvstore (key, value, size, expires_at)
-				VALUES ('cache:expired', 'old', 3, datetime('now', '-1 seconds'))
+			_, err := service.db.ExecContext(ctx, `
+				INSERT INTO plugin_kvstore (plugin_id, key, value, size, expires_at)
+				VALUES (@plugin, 'cache:expired', 'old', 3, CURRENT_TIMESTAMP - INTERVAL '1 second')
 			`)
 			Expect(err).ToNot(HaveOccurred())
 
@@ -654,9 +645,9 @@ var _ = Describe("KVStoreService", func() {
 		})
 
 		It("excludes expired keys", func() {
-			_, err := service.db.Exec(`
-				INSERT INTO kvstore (key, value, size, expires_at)
-				VALUES ('expired_many', 'old', 3, datetime('now', '-1 seconds'))
+			_, err := service.db.ExecContext(ctx, `
+				INSERT INTO plugin_kvstore (plugin_id, key, value, size, expires_at)
+				VALUES (@plugin, 'expired_many', 'old', 3, CURRENT_TIMESTAMP - INTERVAL '1 second')
 			`)
 			Expect(err).ToNot(HaveOccurred())
 
@@ -703,6 +694,9 @@ var _ = Describe("KVStoreService Integration", Ordered, func() {
 		conf.Server.Plugins.Folder = conf.NewDir(tmpDir)
 		conf.Server.Plugins.AutoReload = false
 		conf.Server.DataFolder = conf.NewDir(tmpDir)
+
+		_, err = db.Db().ExecContext(GinkgoT().Context(), "INSERT INTO plugin(id,path,manifest,sha256,created_at,updated_at) VALUES ($1,'','{}','',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING", "test-kvstore")
+		Expect(err).ToNot(HaveOccurred())
 
 		// Setup mock DataStore with pre-enabled plugin
 		mockPluginRepo := tests.CreateMockPluginRepo()
@@ -1029,10 +1023,6 @@ var _ = Describe("KVStoreService Integration", Ordered, func() {
 	})
 
 	Describe("Database Isolation", func() {
-		It("should create separate database file for plugin", func() {
-			dbPath := filepath.Join(tmpDir, "plugins", "test-kvstore", "kvstore.db")
-			_, err := os.Stat(dbPath)
-			Expect(err).ToNot(HaveOccurred())
-		})
+
 	})
 })

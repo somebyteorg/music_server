@@ -2,27 +2,20 @@ package persistence
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
-	"iter"
 	"reflect"
-	"regexp"
+	"sort"
 	"strings"
-	"time"
 
 	. "github.com/Masterminds/squirrel"
 	"github.com/deluan/rest"
-	"github.com/navidrome/navidrome/conf"
-	"github.com/navidrome/navidrome/db"
-	"github.com/navidrome/navidrome/log"
+	"github.com/lann/builder"
 	"github.com/navidrome/navidrome/model"
 	id2 "github.com/navidrome/navidrome/model/id"
 	"github.com/navidrome/navidrome/model/request"
-	"github.com/navidrome/navidrome/utils/hasher"
 	"github.com/navidrome/navidrome/utils/slice"
 	"github.com/pocketbase/dbx"
-	"github.com/zeebo/xxh3"
 )
 
 // sqlRepository is the base repository for all SQL repositories. It provides common functions to interact with the DB.
@@ -111,179 +104,6 @@ func (r *sqlRepository) registerModel(instance any, filters map[string]filterFun
 	r.filterMappings = filters
 }
 
-// setSortMappings sets the mappings for the sort fields. If the sort field is not in the map, it will be used as is.
-// This applies per comma-separated part, so a key added here also defines that bare name wherever a
-// caller uses it inside a sort list.
-//
-// If PreferSortTags is enabled, it will map the order fields to the corresponding sort expression,
-// which gives precedence to sort tags.
-// Ex: order_title => (coalesce(nullif(sort_title,”),order_title) collate nocase)
-// To avoid performance issues, indexes should be created for these sort expressions
-//
-// NOTE: if an individual item has spaces, it should be wrapped in parentheses. For example,
-// you should write "(lyrics != '[]')". This prevents the item being split unexpectedly.
-// Without parentheses, "lyrics != '[]'" would be mapped as simply "lyrics"
-func (r *sqlRepository) setSortMappings(mappings map[string]string, tableName ...string) {
-	tn := r.tableName
-	if len(tableName) > 0 {
-		tn = tableName[0]
-	}
-	if conf.Server.PreferSortTags || conf.Server.EnableNaturalSorting {
-		for k, v := range mappings {
-			mappings[k] = mapSortOrder(tn, v)
-		}
-	}
-	r.sortMappings = mappings
-}
-
-func (r sqlRepository) newSelect(ctx context.Context, options ...model.QueryOptions) SelectBuilder {
-	sq := Select().From(r.tableName)
-	if len(options) > 0 {
-		r.resetSeededRandom(ctx, options)
-		sq = r.applyOptions(sq, options...)
-		sq = r.applyFilters(sq, options...)
-	}
-	return sq
-}
-
-func (r sqlRepository) applyOptions(sq SelectBuilder, options ...model.QueryOptions) SelectBuilder {
-	if len(options) > 0 {
-		if options[0].Max > 0 {
-			sq = sq.Limit(uint64(options[0].Max))
-		}
-		if options[0].Offset > 0 {
-			sq = sq.Offset(uint64(options[0].Offset))
-		}
-		if options[0].Sort != "" {
-			sort, order := options[0].Sort, options[0].Order
-			// Per-key directions are absolute, so buildSortOrder gets an ascending baseline.
-			// resetSeededRandom has already rewritten "random" to SEEDEDRAND by here.
-			if len(options[0].SortOrders) > 0 && sort != "random" && !strings.HasPrefix(sort, "SEEDEDRAND(") {
-				sort = r.sortWithKeyOrders(sort, options[0].SortOrders)
-				order = ""
-			}
-			sq = sq.OrderBy(r.buildSortOrder(sort, order))
-		}
-	}
-	return sq
-}
-
-// TODO Change all sortMappings to have a consistent case
-func (r sqlRepository) sortMapping(sort string) string {
-	if mapping, _, ok := r.lookupSortMapping(sort); ok {
-		return mapping
-	}
-	// Each part of a comma list is resolved on its own, so a mix of mapped keys and plain columns
-	// keeps the mappings the recognized parts have.
-	parts := strings.FieldsFunc(sort, splitFunc(','))
-	mapped := make([]string, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if partMapping, _, ok := r.lookupSortMapping(part); ok {
-			part = partMapping
-		} else {
-			part = toSnakeCase(part)
-		}
-		mapped = append(mapped, part)
-	}
-	return strings.Join(mapped, ", ")
-}
-
-// lookupSortMapping also returns the snake_case form when it had to derive one, so a caller's
-// fallback doesn't recompute it: toSnakeCase runs two regexps.
-func (r sqlRepository) lookupSortMapping(sort string) (mapping, snakeCased string, ok bool) {
-	if mapping, ok = r.sortMappings[sort]; ok {
-		return mapping, sort, true
-	}
-	if mapping, ok = r.sortMappings[toCamelCase(sort)]; ok {
-		return mapping, "", true
-	}
-	snakeCased = toSnakeCase(sort)
-	mapping, ok = r.sortMappings[snakeCased]
-	return mapping, snakeCased, ok
-}
-
-// sortWithKeyOrders maps each logical sort key, then marks descending keys so buildSortOrder
-// keeps that direction on every column the mapping expands into.
-func (r sqlRepository) sortWithKeyOrders(sort string, orders []string) string {
-	keys := strings.FieldsFunc(sort, splitFunc(','))
-	out := make([]string, 0, len(keys))
-	for i, key := range keys {
-		key = strings.TrimSpace(key)
-		if key == "" {
-			continue
-		}
-		mapped := r.sortMapping(key)
-		if !descendingOrder(i, orders) {
-			out = append(out, mapped)
-			continue
-		}
-		for _, col := range strings.FieldsFunc(mapped, splitFunc(',')) {
-			out = append(out, strings.TrimSpace(col)+" desc")
-		}
-	}
-	return strings.Join(out, ", ")
-}
-
-func descendingOrder(i int, orders []string) bool {
-	if len(orders) == 0 {
-		return false
-	}
-	raw := orders[0]
-	if i < len(orders) {
-		raw = orders[i]
-	}
-	return raw == "desc"
-}
-
-func (r sqlRepository) buildSortOrder(sort, order string) string {
-	sort = r.sortMapping(sort)
-	order = strings.ToLower(strings.TrimSpace(order))
-	var reverseOrder string
-	if order == "desc" {
-		reverseOrder = "asc"
-	} else {
-		order = "asc"
-		reverseOrder = "desc"
-	}
-
-	parts := strings.FieldsFunc(sort, splitFunc(','))
-	newSort := make([]string, 0, len(parts))
-	for _, p := range parts {
-		f := strings.FieldsFunc(p, splitFunc(' '))
-		newField := make([]string, 1, len(f))
-		newField[0] = f[0]
-		if len(f) == 1 {
-			newField = append(newField, order)
-		} else {
-			if f[1] == "asc" {
-				newField = append(newField, order)
-			} else {
-				newField = append(newField, reverseOrder)
-			}
-		}
-		newSort = append(newSort, strings.Join(newField, " "))
-	}
-	return strings.Join(newSort, ", ")
-}
-
-func splitFunc(delimiter rune) func(c rune) bool {
-	open := 0
-	return func(c rune) bool {
-		if c == '(' {
-			open++
-			return false
-		}
-		if open > 0 {
-			if c == ')' {
-				open--
-			}
-			return false
-		}
-		return c == delimiter
-	}
-}
-
 func (r sqlRepository) applyFilters(sq SelectBuilder, options ...model.QueryOptions) SelectBuilder {
 	if len(options) > 0 && options[0].Filters != nil {
 		sq = sq.Where(options[0].Filters)
@@ -306,12 +126,6 @@ func (r sqlRepository) applyLibraryFilter(ctx context.Context, sq SelectBuilder,
 		return sq
 	}
 
-	// A non-admin granted every library sees everything the subquery would return, so applying it is
-	// pure overhead. Skip it in that case (same fast path admins get).
-	if visible, err := r.visibleLibraryIDs(ctx); err == nil && r.userSeesAllLibraries(ctx, visible) {
-		return sq
-	}
-
 	table := r.tableName
 	if len(tableName) > 0 {
 		table = tableName[0]
@@ -323,213 +137,11 @@ func (r sqlRepository) applyLibraryFilter(ctx context.Context, sq SelectBuilder,
 		"SELECT ul.library_id FROM user_library ul WHERE ul.user_id = ?)", user.ID))
 }
 
-// userSeesAllLibraries reports whether the visible set already covers every library, so a
-// library filter would exclude nothing.
-func (r sqlRepository) userSeesAllLibraries(ctx context.Context, visible []int) bool {
-	user := loggedUser(ctx)
-	if user.IsAdmin || user.ID == invalidUserId {
-		return true // visible is the whole library table
-	}
-	var res struct{ Count int64 }
-	err := r.queryOne(ctx, Select("count(*) as count").From("library"), &res)
-	if err != nil || res.Count == 0 {
-		return false
-	}
-	return int64(len(visible)) == res.Count
-}
-
-// visibleLibraryIDs returns the libraries the current user can see: all libraries for admin and
-// headless processes, otherwise the user's granted libraries.
-func (r sqlRepository) visibleLibraryIDs(ctx context.Context) ([]int, error) {
-	user := loggedUser(ctx)
-	if user.IsAdmin || user.ID == invalidUserId {
-		var ids []int
-		err := r.queryAllSlice(ctx, Select("id").From("library"), &ids)
-		return ids, err
-	}
-	return slice.Map(user.Libraries, func(lib model.Library) int { return lib.ID }), nil
-}
-
-func (r sqlRepository) seedKey(ctx context.Context) string {
-	// Seed keys must be all lowercase, or else SQLite3 will encode it, making it not match the seed
-	// used in the query. Hashing the user ID and converting it to a hex string will do the trick
-	userIDHash := xxh3.Hash([]byte(loggedUser(ctx).ID))
-	return fmt.Sprintf("%s|%016x", r.tableName, userIDHash)
-}
-
-func (r sqlRepository) resetSeededRandom(ctx context.Context, options []model.QueryOptions) {
-	if len(options) == 0 || options[0].Sort != "random" {
-		return
-	}
-	// CAST: playlist_tracks.id is an INTEGER (unlike other tables' TEXT ids); passing it to
-	// SEEDEDRAND's string param uncast silently drops every row (go-sqlite3 binding gotcha).
-	options[0].Sort = fmt.Sprintf("SEEDEDRAND('%s', CAST(%s.id AS TEXT))", r.seedKey(ctx), r.tableName)
-	if options[0].Seed != "" {
-		hasher.SetSeed(r.seedKey(ctx), options[0].Seed)
-		return
-	}
-	if options[0].Offset == 0 {
-		hasher.Reseed(r.seedKey(ctx))
-	}
-}
-
-func (r sqlRepository) executeSQL(ctx context.Context, sq Sqlizer) (int64, error) {
-	query, args, err := r.toSQL(sq)
-	if err != nil {
-		return 0, err
-	}
-	start := time.Now()
-	var c int64
-	res, err := r.db.NewQuery(query).Bind(args).WithContext(ctx).Execute()
-	if res != nil {
-		c, _ = res.RowsAffected()
-	}
-	r.logSQL(ctx, query, args, err, c, start)
-	if err != nil {
-		if err.Error() != "LastInsertId is not supported by this driver" {
-			return 0, err
-		}
-	}
-	return c, err
-}
-
-var placeholderRegex = regexp.MustCompile(`\?`)
-
-func (r sqlRepository) toSQL(sq Sqlizer) (string, dbx.Params, error) {
-	query, args, err := sq.ToSql()
-	if err != nil {
-		return "", nil, err
-	}
-	// Replace query placeholders with named params
-	params := make(dbx.Params, len(args))
-	counter := 0
-	result := placeholderRegex.ReplaceAllStringFunc(query, func(_ string) string {
-		p := fmt.Sprintf("p%d", counter)
-		params[p] = args[counter]
-		counter++
-		return "{:" + p + "}"
-	})
-	return result, params, nil
-}
-
-func (r sqlRepository) queryOne(ctx context.Context, sq Sqlizer, response any) error {
-	query, args, err := r.toSQL(sq)
-	if err != nil {
-		return err
-	}
-	start := time.Now()
-	err = r.db.NewQuery(query).Bind(args).WithContext(ctx).One(response)
-	if errors.Is(err, sql.ErrNoRows) {
-		r.logSQL(ctx, query, args, nil, 0, start)
-		return model.ErrNotFound
-	}
-	r.logSQL(ctx, query, args, err, 1, start)
-	return err
-}
-
-// wrapCursor adapts a cursor over db rows into one over their models. toModel pulls out the row's
-// embedded model, which a type parameter can't reach on its own.
-func wrapCursor[D, T any](cursor iter.Seq2[D, error], toModel func(D) *T) iter.Seq2[T, error] {
-	return func(yield func(T, error) bool) {
-		for row, err := range cursor {
-			m := toModel(row)
-			if m == nil {
-				// Don't format row: its String() derefs the nil model (golang/go#81238).
-				var zero T
-				yield(zero, fmt.Errorf("unexpected nil %T: %w", zero, err))
-				return
-			}
-			if !yield(*m, err) || err != nil {
-				return
-			}
-		}
-	}
-}
-
-// queryWithStableResults is a helper function to execute a query and return an iterator that will yield its results
-// from a cursor, guaranteeing that the results will be stable, even if the underlying data changes.
-func queryWithStableResults[T any](ctx context.Context, r sqlRepository, sq SelectBuilder, options ...model.QueryOptions) (iter.Seq2[T, error], error) {
-	if len(options) > 0 && options[0].Offset > 0 {
-		sq = r.optimizePagination(sq, options[0])
-	}
-	query, args, err := r.toSQL(sq)
-	if err != nil {
-		return nil, err
-	}
-	start := time.Now()
-	rows, err := r.db.NewQuery(query).Bind(args).WithContext(ctx).Rows()
-	r.logSQL(ctx, query, args, err, -1, start)
-	if err != nil {
-		return nil, err
-	}
-	return func(yield func(T, error) bool) {
-		defer rows.Close()
-		for rows.Next() {
-			var row T
-			err := rows.ScanStruct(&row)
-			if !yield(row, err) || err != nil {
-				return
-			}
-		}
-		if err := rows.Err(); err != nil {
-			var empty T
-			yield(empty, err)
-		}
-	}, nil
-}
-
-func (r sqlRepository) queryAll(ctx context.Context, sq SelectBuilder, response any, options ...model.QueryOptions) error {
-	if len(options) > 0 && options[0].Offset > 0 {
-		sq = r.optimizePagination(sq, options[0])
-	}
-	query, args, err := r.toSQL(sq)
-	if err != nil {
-		return err
-	}
-	start := time.Now()
-	err = r.db.NewQuery(query).Bind(args).WithContext(ctx).All(response)
-	if errors.Is(err, sql.ErrNoRows) {
-		r.logSQL(ctx, query, args, nil, -1, start)
-		return model.ErrNotFound
-	}
-	r.logSQL(ctx, query, args, err, int64(reflect.ValueOf(response).Elem().Len()), start)
-	return err
-}
-
-// queryAllSlice is a helper function to query a single column and return the result in a slice
-func (r sqlRepository) queryAllSlice(ctx context.Context, sq SelectBuilder, response any) error {
-	query, args, err := r.toSQL(sq)
-	if err != nil {
-		return err
-	}
-	start := time.Now()
-	err = r.db.NewQuery(query).Bind(args).WithContext(ctx).Column(response)
-	if errors.Is(err, sql.ErrNoRows) {
-		r.logSQL(ctx, query, args, nil, -1, start)
-		return model.ErrNotFound
-	}
-	r.logSQL(ctx, query, args, err, int64(reflect.ValueOf(response).Elem().Len()), start)
-	return err
-}
-
-// optimizePagination uses a less inefficient pagination, by not using OFFSET.
-// See https://gist.github.com/ssokolow/262503
-func (r sqlRepository) optimizePagination(sq SelectBuilder, options model.QueryOptions) SelectBuilder {
-	if options.Offset > conf.Server.DevOffsetOptimize {
-		sq = sq.RemoveOffset()
-		rowidSq := sq.RemoveColumns().Columns(r.tableName + ".rowid")
-		rowidSq = rowidSq.Limit(uint64(options.Offset))
-		rowidSql, args, _ := rowidSq.ToSql()
-		sq = sq.Where(r.tableName+".rowid not in ("+rowidSql+")", args...)
-	}
-	return sq
-}
-
 func (r sqlRepository) exists(ctx context.Context, cond Sqlizer) (bool, error) {
-	existsQuery := Select("count(*) as exist").From(r.tableName).Where(cond)
-	var res struct{ Exist int64 }
+	existsQuery := Select().Column(Alias(Exists(r.tableName, cond), "exist"))
+	var res struct{ Exist bool }
 	err := r.queryOne(ctx, existsQuery, &res)
-	return res.Exist > 0, err
+	return res.Exist, err
 }
 
 // updateOwned performs an atomic, ownership-restricted update of the row identified by id, for
@@ -603,10 +215,9 @@ func (r sqlRepository) classifyOwnedWriteMiss(ctx context.Context, id string) er
 }
 
 func (r sqlRepository) count(ctx context.Context, countQuery SelectBuilder, options ...model.QueryOptions) (int64, error) {
-	countQuery = countQuery.
+	countQuery = clearOrder(builder.Delete(countQuery, "GroupBys").(SelectBuilder)).
 		RemoveColumns().Columns("count(distinct " + r.tableName + ".id) as count").
 		RemoveOffset().RemoveLimit().
-		OrderBy(r.tableName + ".id"). // To remove any ORDER BY clause that could slow down the query
 		From(r.tableName)
 	countQuery = r.applyFilters(countQuery, options...)
 	var res struct{ Count int64 }
@@ -660,24 +271,26 @@ func (r sqlRepository) put(ctx context.Context, id string, m any, colsToUpdate .
 	if err != nil {
 		return "", fmt.Errorf("error preparing values to write to DB: %w", err)
 	}
-	// If there's an ID, try to update first
-	if id != "" {
-		update := Update(r.tableName).Where(Eq{"id": id}).SetMap(filterUpdateValues(values, id, colsToUpdate...))
-		count, err := r.executeSQL(ctx, update)
-		if err != nil {
-			return "", err
-		}
-		if count > 0 {
-			return id, nil
-		}
-	}
-	// If it does not have an ID OR the ID was not found (when it is a new record with predefined id)
 	if id == "" {
 		id = id2.NewRandom()
-		values["id"] = id
 	}
-	insert := Insert(r.tableName).SetMap(values)
-	_, err = r.executeSQL(ctx, insert)
+	values["id"] = id
+	updates := selectUpdateColumns(values, colsToUpdate...)
+	delete(updates, "id")
+	keys := make([]string, 0, len(updates))
+	for key := range updates {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	assignments := make([]string, len(keys))
+	for i, key := range keys {
+		assignments[i] = key + " = EXCLUDED." + key
+	}
+	conflict := "ON CONFLICT (id) DO NOTHING"
+	if len(assignments) > 0 {
+		conflict = "ON CONFLICT (id) DO UPDATE SET " + strings.Join(assignments, ", ")
+	}
+	_, err = r.executeSQL(ctx, Insert(r.tableName).SetMap(values).Suffix(conflict))
 	return id, err
 }
 
@@ -696,23 +309,4 @@ func (r sqlRepository) deleteByID(ctx context.Context, id string) error {
 		return model.ErrNotFound
 	}
 	return nil
-}
-
-func (r sqlRepository) logSQL(ctx context.Context, sql string, args dbx.Params, err error, rowsAffected int64, start time.Time) {
-	elapsed := time.Since(start)
-	fields := []any{ctx, "SQL: `" + sql + "`", "args", args, "rowsAffected", rowsAffected, "elapsedTime", elapsed}
-	if err == nil || errors.Is(err, context.Canceled) {
-		log.Trace(append(fields, err)...)
-		return
-	}
-	// The result codes separate errors that share a message, notably SQLITE_BUSY from
-	// SQLITE_BUSY_SNAPSHOT, which no busy_timeout can retry.
-	if code, extended, ok := db.ErrorCodes(err); ok {
-		fields = append(fields, "sqliteCode", code, "sqliteExtended", extended)
-	}
-	if db.IsBusy(err) && hasBusyRetry(ctx) {
-		log.Warn(append(fields, err)...)
-		return
-	}
-	log.Error(append(fields, err)...)
 }

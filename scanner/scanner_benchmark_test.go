@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"path/filepath"
 	"runtime"
 	"testing"
 	"testing/fstest"
@@ -43,15 +42,13 @@ func BenchmarkScan(b *testing.B) {
 
 	tests.Init(b, false)
 
-	tmpDir := b.TempDir()
-	conf.Server.DbPath = filepath.Join(tmpDir, "test-scanner.db?_journal_mode=WAL")
 	// The default library is seeded from MusicFolder, and its path cannot be changed afterwards
 	conf.Server.MusicFolder = "fake:///music"
 	// TestScanner may run first and close the shared DB singleton; drop it so db.Init
 	// opens a fresh one whether or not the test suite ran before this benchmark.
 	singleton.DeleteInstance[*sql.DB]()
-	// Close before b.TempDir cleanup runs, or Windows cannot delete the open DB/WAL files.
-	defer db.Init(context.Background())()
+	// The benchmark owns its isolated PostgreSQL schema.
+	tests.InitDB(context.Background())
 
 	ds := persistence.New(db.Db())
 	conf.Server.DevExternalScanner = false

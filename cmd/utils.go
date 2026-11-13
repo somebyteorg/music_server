@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"strings"
 	"text/tabwriter"
 
 	"github.com/navidrome/navidrome/conf"
@@ -18,17 +16,14 @@ import (
 	"github.com/navidrome/navidrome/persistence"
 )
 
-// existingDBFile returns the database file (DbPath minus DSN params), and whether it exists.
-func existingDBFile() (string, bool) {
-	path, _, _ := strings.Cut(conf.Server.DbPath, "?")
-	_, err := os.Stat(path)
-	return path, err == nil
-}
-
-// requireExistingDB aborts the command when the database file does not exist.
+// requireExistingDB prevents maintenance commands from initializing an empty schema.
 func requireExistingDB() {
-	if path, ok := existingDBFile(); !ok {
-		log.Fatal("No existing database", "path", path)
+	exists, err := db.Exists(context.Background())
+	if err != nil {
+		log.Fatal("Cannot inspect PostgreSQL schema", err)
+	}
+	if !exists {
+		log.Fatal("No initialized Navidrome database", "schema", conf.Server.DatabaseSchema)
 	}
 }
 

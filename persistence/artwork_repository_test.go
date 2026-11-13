@@ -39,7 +39,7 @@ var _ = Describe("ArtworkRepository", func() {
 
 			got, err := repo.GetItemArtwork(ctx, model.KindAlbumArtwork, "t1", model.ImageTypePrimary)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(got.Trace).To(Equal(traceJSON))
+			Expect(got.Trace).To(MatchJSON(traceJSON))
 			Expect(got.LastFailure).To(BeEmpty())
 		})
 
@@ -50,7 +50,7 @@ var _ = Describe("ArtworkRepository", func() {
 				ImageType: model.ImageTypePrimary, Trace: `[{"c":"embedded","o":"hit"}]`})).To(Succeed())
 
 			got, _ := repo.GetItemArtwork(ctx, model.KindAlbumArtwork, "t2", model.ImageTypePrimary)
-			Expect(got.Trace).To(Equal(`[{"c":"embedded","o":"hit"}]`))
+			Expect(got.Trace).To(MatchJSON(`[{"c":"embedded","o":"hit"}]`))
 		})
 
 		It("records a last failure on an existing row", func() {
@@ -61,7 +61,7 @@ var _ = Describe("ArtworkRepository", func() {
 				`[{"c":"decode","o":"error"}]`)).To(Succeed())
 
 			got, _ := repo.GetItemArtwork(ctx, model.KindAlbumArtwork, "t3", model.ImageTypePrimary)
-			Expect(got.LastFailure).To(Equal(`[{"c":"decode","o":"error"}]`))
+			Expect(got.LastFailure).To(MatchJSON(`[{"c":"decode","o":"error"}]`))
 			Expect(got.Hash).To(Equal("h3"), "recording a failure must not disturb the served artwork")
 		})
 

@@ -7,11 +7,10 @@ import (
 	"context"
 	"errors"
 	"io"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing/fstest"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/navidrome/navidrome/conf"
 	"github.com/navidrome/navidrome/core/artwork"
 	"github.com/navidrome/navidrome/core/auth"
@@ -22,19 +21,18 @@ import (
 	"github.com/navidrome/navidrome/core/stream"
 	"github.com/navidrome/navidrome/db"
 	"github.com/navidrome/navidrome/model"
+	"github.com/navidrome/navidrome/model/id"
 	"github.com/navidrome/navidrome/persistence"
 	"github.com/navidrome/navidrome/scanner"
 	"github.com/navidrome/navidrome/server/events"
 	"github.com/navidrome/navidrome/tests"
-	"github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega" //nolint:staticcheck
 )
 
 // DB is a golden e2e database: scanned once in BeforeSuite, restored per test via Restore.
 type DB struct {
-	FilePath     string
-	SnapshotPath string
-	Library      model.Library
+	snapshot *tests.DatabaseSnapshot
+	Library  model.Library
 }
 
 // CreateFS registers files under the "fake:" storage scheme the suites use as MusicFolder.
@@ -45,17 +43,15 @@ func CreateFS(files fstest.MapFS) storagetest.FakeFS {
 	return fs
 }
 
-// SetupDB boots the golden database: a temp SQLite file, the given users (password "password",
+// SetupDB boots the golden database: an isolated PostgreSQL schema, the given users (password "password",
 // all with access to the seeded "Music Library"), a full scan of the registered fake FS, and a
-// snapshot for per-test restore. Callers must set conf.Server.MusicFolder and register the FS
+// schema snapshot for per-test restore. Callers must set conf.Server.MusicFolder and register the FS
 // first; each user's Libraries field is populated in place.
 func SetupDB(ctx context.Context, users ...*model.User) *DB {
-	tmpDir := ginkgo.GinkgoT().TempDir()
-	h := &DB{FilePath: filepath.Join(tmpDir, "test-e2e.db")}
-	h.SnapshotPath = h.FilePath + ".snapshot"
-	conf.Server.DbPath = h.FilePath + "?_journal_mode=WAL"
+	h := &DB{}
+	conf.Server.DatabaseSchema = "navidrome_e2e_" + strings.ToLower(id.NewRandom())
 	db.Db().SetMaxOpenConns(1)
-	db.Init(ctx)
+	tests.InitDB(ctx)
 
 	ds := &tests.MockDataStore{RealDS: persistence.New(db.Db())}
 	auth.Init(ds)
@@ -78,67 +74,46 @@ func SetupDB(ctx context.Context, users ...*model.User) *DB {
 	_, err := s.ScanAll(ctx, true)
 	Expect(err).ToNot(HaveOccurred())
 
-	_, err = db.Db().Exec("PRAGMA wal_checkpoint(TRUNCATE)")
-	Expect(err).ToNot(HaveOccurred())
-	data, err := os.ReadFile(h.FilePath)
-	Expect(err).ToNot(HaveOccurred())
-	Expect(os.WriteFile(h.SnapshotPath, data, 0o600)).To(Succeed()) //nolint:gosec // path derives from TempDir
+	h.Capture()
+
 	return h
 }
 
-// ResettableTables lists the tables a per-spec reset may write. FTS shadow tables are excluded:
-// their content tables' triggers keep them in sync, and writing them directly corrupts the index.
+// Capture saves the current schema's rows for restoring existing examples.
+func (h *DB) Capture() {
+	var err error
+	h.snapshot, err = tests.CaptureDatabase(context.Background())
+	Expect(err).ToNot(HaveOccurred())
+}
+
+// ResettableTables returns application tables, preserving migration bookkeeping.
 func ResettableTables() []string {
-	rows, err := db.Db().Query("SELECT name FROM main.sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '%_fts' AND name NOT LIKE '%_fts_%'")
+	rows, err := db.Db().Query("SELECT tablename FROM pg_tables WHERE schemaname=current_schema() AND tablename <> 'goose_db_version' ORDER BY tablename")
 	Expect(err).ToNot(HaveOccurred())
 	defer rows.Close()
 	var tables []string
 	for rows.Next() {
-		var name string
-		Expect(rows.Scan(&name)).To(Succeed())
-		tables = append(tables, name)
+		var table string
+		Expect(rows.Scan(&table)).To(Succeed())
+		tables = append(tables, table)
 	}
 	Expect(rows.Err()).ToNot(HaveOccurred())
 	return tables
 }
 
-// TruncateDB empties every resettable table, leaving the migrated schema in place — for suites
-// whose specs each build their own library, so the schema is not re-migrated per spec.
 func TruncateDB(tables []string) {
-	sqlDB := db.Db()
-	_, err := sqlDB.Exec("PRAGMA foreign_keys = OFF")
-	Expect(err).ToNot(HaveOccurred())
-	defer func() { _, _ = sqlDB.Exec("PRAGMA foreign_keys = ON") }()
-
-	for _, table := range tables {
-		// Table names come from sqlite_master, not user input.
-		_, err = sqlDB.Exec(`DELETE FROM main."` + table + `"`) //nolint:gosec
-		Expect(err).ToNot(HaveOccurred())
+	if len(tables) == 0 {
+		return
 	}
+	names := make([]string, len(tables))
+	for i, table := range tables {
+		names[i] = pgx.Identifier{table}.Sanitize()
+	}
+	_, err := db.Db().Exec("TRUNCATE " + strings.Join(names, ", ") + " CASCADE")
+	Expect(err).ToNot(HaveOccurred())
 }
 
-// Restore reloads every table from the golden snapshot via ATTACH DATABASE — much faster than a
-// rescan.
-func (h *DB) Restore() {
-	sqlDB := db.Db()
-	_, err := sqlDB.Exec("PRAGMA foreign_keys = OFF")
-	Expect(err).ToNot(HaveOccurred())
-	_, err = sqlDB.Exec("ATTACH DATABASE ? AS snapshot", h.SnapshotPath)
-	Expect(err).ToNot(HaveOccurred())
-
-	for _, table := range ResettableTables() {
-		// Table names come from sqlite_master, not user input.
-		_, err = sqlDB.Exec(`DELETE FROM main."` + table + `"`) //nolint:gosec
-		Expect(err).ToNot(HaveOccurred())
-		_, err = sqlDB.Exec(`INSERT INTO main."` + table + `" SELECT * FROM snapshot."` + table + `"`) //nolint:gosec
-		Expect(err).ToNot(HaveOccurred())
-	}
-
-	_, err = sqlDB.Exec("DETACH DATABASE snapshot")
-	Expect(err).ToNot(HaveOccurred())
-	_, err = sqlDB.Exec("PRAGMA foreign_keys = ON")
-	Expect(err).ToNot(HaveOccurred())
-}
+func (h *DB) Restore() { Expect(h.snapshot.Restore(context.Background())).To(Succeed()) }
 
 // SpyStreamer captures the Request passed to NewStream and returns a minimal fake stream.
 type SpyStreamer struct {

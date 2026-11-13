@@ -10,7 +10,6 @@ import (
 	"os"
 	"slices"
 	"strings"
-	"time"
 
 	. "github.com/Masterminds/squirrel"
 	"github.com/deluan/rest"
@@ -148,14 +147,14 @@ func NewArtistRepository(db dbx.Builder) model.ArtistRepository {
 		"name":        "order_artist_name",
 		"starred_at":  "starred, starred_at",
 		"rated_at":    "rating, rated_at",
-		"song_count":  "stats->>'total'->>'m'",
-		"album_count": "stats->>'total'->>'a'",
-		"size":        "stats->>'total'->>'s'",
+		"song_count":  "sum(coalesce((library_artist.stats #>> '{total,m}')::bigint, 0))",
+		"album_count": "sum(coalesce((library_artist.stats #>> '{total,a}')::bigint, 0))",
+		"size":        "sum(coalesce((library_artist.stats #>> '{total,s}')::bigint, 0))",
 
 		// Stats by credits that are currently available
-		"maincredit_song_count":  "sum(stats->>'maincredit'->>'m')",
-		"maincredit_album_count": "sum(stats->>'maincredit'->>'a')",
-		"maincredit_size":        "sum(stats->>'maincredit'->>'s')",
+		"maincredit_song_count":  "sum(coalesce((library_artist.stats #>> '{maincredit,m}')::bigint, 0))",
+		"maincredit_album_count": "sum(coalesce((library_artist.stats #>> '{maincredit,a}')::bigint, 0))",
+		"maincredit_size":        "sum(coalesce((library_artist.stats #>> '{maincredit,s}')::bigint, 0))",
 	})
 	return r
 }
@@ -163,7 +162,7 @@ func NewArtistRepository(db dbx.Builder) model.ArtistRepository {
 func roleFilter(_ string, role any) Sqlizer {
 	if role, ok := role.(string); ok {
 		if safe, ok := sanitizeArtistStatsRole(role); ok && safe != "total" {
-			return Expr("JSON_EXTRACT(library_artist.stats, '$." + safe + ".m') IS NOT NULL")
+			return Expr("jsonb_extract_path_text(library_artist.stats, ?, 'm') IS NOT NULL", safe)
 		}
 	}
 	return Eq{"1": 2}
@@ -207,7 +206,7 @@ func (r *artistRepository) applyLibraryFilterToArtistQuery(ctx context.Context, 
 func (r *artistRepository) selectArtist(ctx context.Context, options ...model.QueryOptions) SelectBuilder {
 	// Stats Format: {"1": {"albumartist": {"m": 10, "a": 5, "s": 1024}, "artist": {...}}, "2": {...}}
 	query := r.newSelect(ctx, options...).Columns("artist.*",
-		"JSON_GROUP_OBJECT(library_artist.library_id, JSONB(library_artist.stats)) as library_stats_json")
+		"jsonb_object_agg(library_artist.library_id, library_artist.stats) as library_stats_json")
 
 	query = r.applyLibraryFilterToArtistQuery(ctx, query)
 	query = query.GroupBy("artist.id")
@@ -238,7 +237,7 @@ func (r *artistRepository) Exists(ctx context.Context, id string) (bool, error) 
 
 func (r *artistRepository) Put(ctx context.Context, a *model.Artist, colsToUpdate ...string) error {
 	dba := &dbArtist{Artist: a}
-	dba.CreatedAt = new(time.Now())
+	dba.CreatedAt = new(databaseNow())
 	dba.UpdatedAt = dba.CreatedAt
 	_, err := r.put(ctx, dba.ID, dba, colsToUpdate...)
 	return err
@@ -278,18 +277,6 @@ func (r *artistRepository) GetAll(ctx context.Context, options ...model.QueryOpt
 	return res, err
 }
 
-// getAllIDs returns just the artist IDs for the same row set as GetAll, skipping the
-// heavy stats columns and JSON post-processing.
-func (r *artistRepository) getAllIDs(ctx context.Context, options ...model.QueryOptions) ([]string, error) {
-	sq := r.applyLibraryFilterToArtistQuery(ctx, r.newSelect(ctx, options...).Columns("artist.id")).GroupBy("artist.id")
-	if filtersNeedAnnotation(sq) {
-		sq = r.withAnnotation(ctx, sq, "artist.id")
-	}
-	ids := []string{}
-	err := r.queryAllSlice(ctx, sq, &ids)
-	return ids, err
-}
-
 // hydrateArtwork fills each artist's ImageHash/ImageAbsent from one batched item_artwork lookup.
 func (r *artistRepository) hydrateArtwork(ctx context.Context, artists model.Artists) {
 	hydrateItems(ctx, r.db, model.KindArtistArtwork, artists,
@@ -297,13 +284,13 @@ func (r *artistRepository) hydrateArtwork(ctx context.Context, artists model.Art
 }
 
 func (r *artistRepository) GetCursor(ctx context.Context, options ...model.QueryOptions) (model.ArtistCursor, error) {
-	ids, err := r.getAllIDs(ctx, options...)
+	cursor, err := queryCursor[dbArtist](ctx, r.sqlRepository, r.selectArtist(ctx, options...))
 	if err != nil {
 		return nil, err
 	}
-	opts := chunkOptions(options, "artist.id")
-	return model.ArtistCursor(streamByIDs(ids, func(chunk []string) (model.Artists, error) {
-		return r.GetAll(ctx, opts(chunk))
+	artists := wrapCursor(cursor, func(row dbArtist) *model.Artist { return row.Artist })
+	return model.ArtistCursor(hydrateCursor(artists, func(batch []model.Artist) {
+		r.hydrateArtwork(ctx, batch)
 	})), nil
 }
 
@@ -441,12 +428,12 @@ set missing = (artist.id not in (select artist_id from artists_with_non_missing_
 func (r *artistRepository) RefreshPlayCounts(ctx context.Context) (int64, error) {
 	query := Expr(`
 with play_counts as (
-    select user_id, atom as artist_id, sum(play_count) as total_play_count, max(play_date) as last_play_date
+    select user_id, jt.id as artist_id, sum(play_count) as total_play_count, max(play_date) as last_play_date
     from media_file
-    join annotation on item_id = media_file.id
-    left join json_tree(participants, '$.artist') as jt
-    where atom is not null and key = 'id'
-    group by user_id, atom
+    join annotation on item_id = media_file.id AND item_type = 'media_file'
+    CROSS JOIN LATERAL jsonb_to_recordset(coalesce(participants -> 'artist', '[]'::jsonb)) AS jt(id text)
+    WHERE jt.id IS NOT NULL
+    group by user_id, jt.id
 )
 insert into annotation (user_id, item_id, item_type, play_count, play_date)
 select user_id, artist_id, 'artist', total_play_count, last_play_date
@@ -459,194 +446,8 @@ on conflict (user_id, item_id, item_type) do update
 	return r.executeSQL(ctx, query)
 }
 
-// RefreshStats updates the stats field for artists whose associated media files were updated after the oldest recorded library scan time.
-// When allArtists is true, it refreshes stats for all artists. It processes artists in batches to handle potentially large updates.
-// This method now calculates per-library statistics and stores them in the library_artist junction table.
-func (r *artistRepository) RefreshStats(ctx context.Context, allArtists bool) (int64, error) {
-	var allTouchedArtistIDs []string
-	if allArtists {
-		// Refresh stats for all artists
-		allArtistsQuerySQL := `SELECT DISTINCT id FROM artist WHERE id <> ''`
-		if err := r.db.NewQuery(allArtistsQuerySQL).Column(&allTouchedArtistIDs); err != nil {
-			return 0, fmt.Errorf("fetching all artist IDs: %w", err)
-		}
-		log.Debug(ctx, "RefreshStats: Refreshing all artists.", "count", len(allTouchedArtistIDs))
-	} else {
-		// Only refresh artists with updated timestamps
-		touchedArtistsQuerySQL := `
-        SELECT DISTINCT id
-        FROM artist
-        WHERE updated_at > (SELECT last_scan_at FROM library ORDER BY last_scan_at ASC LIMIT 1)
-        `
-		if err := r.db.NewQuery(touchedArtistsQuerySQL).Column(&allTouchedArtistIDs); err != nil {
-			return 0, fmt.Errorf("fetching touched artist IDs: %w", err)
-		}
-		log.Debug(ctx, "RefreshStats: Refreshing touched artists.", "count", len(allTouchedArtistIDs))
-	}
-
-	if len(allTouchedArtistIDs) == 0 {
-		log.Debug(ctx, "RefreshStats: No artists to update.")
-		return 0, nil
-	}
-
-	// Template for the batch update with placeholder markers that we'll replace
-	// This now calculates per-library statistics and stores them in library_artist.stats
-	batchUpdateStatsSQL := `
-    WITH artist_role_counters AS (
-        SELECT mfa.artist_id,
-               mf.library_id,
-               mfa.role,
-               count(DISTINCT mf.album_id) AS album_count,
-               count(DISTINCT mf.id) AS count,
-               sum(mf.size) AS size
-        FROM media_file_artists mfa
-        JOIN media_file mf ON mfa.media_file_id = mf.id
-        WHERE mfa.artist_id IN (ROLE_IDS_PLACEHOLDER) -- Will replace with actual placeholders
-        GROUP BY mfa.artist_id, mf.library_id, mfa.role
-    ),
-    artist_total_counters AS (
-        SELECT mfa.artist_id,
-               mf.library_id,
-               'total' AS role,
-               count(DISTINCT mf.album_id) AS album_count,
-               count(DISTINCT mf.id) AS count,
-               sum(mf.size) AS size
-        FROM media_file_artists mfa
-        JOIN media_file mf ON mfa.media_file_id = mf.id
-        WHERE mfa.artist_id IN (ROLE_IDS_PLACEHOLDER) -- Will replace with actual placeholders
-        GROUP BY mfa.artist_id, mf.library_id
-    ),
-    artist_participant_counter AS (
-        SELECT mfa.artist_id,
-               mf.library_id,
-               'maincredit' AS role,
-               count(DISTINCT mf.album_id) AS album_count,
-               count(DISTINCT mf.id) AS count,
-               sum(mf.size) AS size
-        FROM media_file_artists mfa
-        JOIN media_file mf ON mfa.media_file_id = mf.id
-        WHERE mfa.artist_id IN (ROLE_IDS_PLACEHOLDER) -- Will replace with actual placeholders
-        AND mfa.role IN ('albumartist', 'artist')
-        GROUP BY mfa.artist_id, mf.library_id
-    ),
-    combined_counters AS (
-        SELECT artist_id, library_id, role, album_count, count, size FROM artist_role_counters
-        UNION ALL
-        SELECT artist_id, library_id, role, album_count, count, size FROM artist_total_counters
-        UNION ALL
-        SELECT artist_id, library_id, role, album_count, count, size FROM artist_participant_counter
-    ),
-    library_artist_counters AS (
-        SELECT artist_id,
-               library_id,
-               json_group_object(
-                       role,
-                       json_object('a', album_count, 'm', count, 's', size)
-               ) AS counters
-        FROM combined_counters
-        GROUP BY artist_id, library_id
-    )
-    UPDATE library_artist
-    SET stats = coalesce((SELECT counters FROM library_artist_counters lac
-                         WHERE lac.artist_id = library_artist.artist_id
-                         AND lac.library_id = library_artist.library_id), '{}')
-    WHERE library_artist.artist_id IN (ROLE_IDS_PLACEHOLDER);` // Will replace with actual placeholders
-
-	var totalRowsAffected int64 = 0
-	const batchSize = 1000
-
-	batchCounter := 0
-	for artistIDBatch := range slice.CollectChunks(slices.Values(allTouchedArtistIDs), batchSize) {
-		batchCounter++
-		log.Trace(ctx, "RefreshStats: Processing batch", "batchNum", batchCounter, "batchSize", len(artistIDBatch))
-
-		// Create placeholders for each ID in the IN clauses
-		placeholders := make([]string, len(artistIDBatch))
-		for i := range artistIDBatch {
-			placeholders[i] = "?"
-		}
-		// Don't add extra parentheses, the IN clause already expects them in SQL syntax
-		inClause := strings.Join(placeholders, ",")
-
-		// Replace the placeholder markers with actual SQL placeholders
-		batchSQL := strings.Replace(batchUpdateStatsSQL, "ROLE_IDS_PLACEHOLDER", inClause, 4)
-
-		// Create a single parameter array with all IDs (repeated 4 times for each IN clause)
-		// We need to repeat each ID 4 times (once for each IN clause)
-		args := make([]any, 4*len(artistIDBatch))
-		for idx, id := range artistIDBatch {
-			for i := range 4 {
-				startIdx := i * len(artistIDBatch)
-				args[startIdx+idx] = id
-			}
-		}
-
-		// Now use Expr with the expanded SQL and all parameters
-		sqlizer := Expr(batchSQL, args...)
-
-		rowsAffected, err := r.executeSQL(ctx, sqlizer)
-		if err != nil {
-			return totalRowsAffected, fmt.Errorf("executing batch update for artist stats (batch %d): %w", batchCounter, err)
-		}
-		totalRowsAffected += rowsAffected
-	}
-
-	// Remove library_artist entries for artists that no longer have any content in a library.
-	cleanupSQL := Delete("library_artist").Where("stats = '{}'")
-	cleanupRows, err := r.executeSQL(ctx, cleanupSQL)
-	if err != nil {
-		log.Warn(ctx, "Failed to cleanup empty library_artist entries", err)
-	} else {
-		if cleanupRows > 0 {
-			log.Debug(ctx, "Cleaned up empty library_artist entries", "rowsDeleted", cleanupRows)
-		}
-		// Reconcile orphans whenever the cleanup removed rows, and on a full refresh so a full scan
-		// also heals any left by older versions.
-		if cleanupRows > 0 || allArtists {
-			if err := r.markOrphansMissing(ctx); err != nil {
-				log.Warn(ctx, "Failed to mark orphaned artists missing after library_artist cleanup", err)
-			}
-		}
-	}
-
-	log.Debug(ctx, "RefreshStats: Successfully updated stats.", "totalArtistsProcessed", len(allTouchedArtistIDs), "totalDBRowsAffected", totalRowsAffected)
-	return totalRowsAffected, nil
-}
-
-// searchCfg builds the per-search config. scope is the set of library IDs the search must
-// restrict artists to, or nil to skip the filter (fast-path). See [artistRepository.searchScope].
-func (r *artistRepository) searchCfg(scope []int) searchConfig {
-	return searchConfig{
-		// Natural order for artists is more performant by ID, due to GROUP BY clause in selectArtist
-		NaturalOrder: "artist.id",
-		OrderBy:      []string{"sum(json_extract(stats, '$.total.m')) desc", "name"},
-		MBIDFields:   []string{"mbz_artist_id"},
-		// scope==nil is the fast-path: no filter (and orphans must not exist — see markOrphansMissing).
-		// Otherwise the join-free [artistLibraryFilter].
-		LibraryFilter: func(query SelectBuilder) SelectBuilder {
-			if scope == nil {
-				return query
-			}
-			return query.Where(artistLibraryFilter(scope))
-		},
-	}
-}
-
-// artistLibraryFilter restricts artists to the given libraries via a correlated EXISTS over the
-// library_artist junction, staying join-free so it can scope the join-free search Phase 1 (a JOIN
-// would fan out rowids and corrupt offset pagination). The inner LIMIT 1 is load-bearing: it stops
-// SQLite from flattening the EXISTS back into a fan-out join, while still using the
-// (library_id, artist_id) UNIQUE autoindex.
-func artistLibraryFilter(libraryIDs []int) Sqlizer {
-	if len(libraryIDs) == 0 {
-		return Eq{"1": 2} // match nothing, without a degenerate `IN ()` subquery
-	}
-	sub, args, _ := Select("1").From("library_artist").
-		Where(And{
-			Expr("library_artist.artist_id = artist.id"),
-			Eq{"library_artist.library_id": libraryIDs},
-		}).Limit(1).ToSql()
-	return Expr("EXISTS ("+sub+")", args...)
+func (r *artistRepository) searchCfg() searchConfig {
+	return searchConfig{NaturalOrder: "artist.id", OrderBy: []string{"sum(coalesce((library_artist.stats #>> '{total,m}')::bigint,0)) desc", "name"}, MBIDFields: []string{"mbz_artist_id"}}
 }
 
 func (r *artistRepository) Search(ctx context.Context, q string, options ...model.QueryOptions) (model.Artists, error) {
@@ -656,49 +457,24 @@ func (r *artistRepository) Search(ctx context.Context, q string, options ...mode
 	}
 	// Artists have no library_id column, so the library_id filter callers pass (same as albums/songs)
 	// can't be applied directly: consume it as the search scope.
-	scope := r.searchScope(ctx, opts.Filters)
+	scope := r.requestedLibraryIDs(opts.Filters)
 	if isLibraryIDFilter(opts.Filters) {
 		opts.Filters = nil
 	}
 	sq := r.selectArtist(ctx, opts)
 	if scope != nil {
-		// Scopes the full SELECT (LIKE and MBID have no Phase 1) and narrows the library_artist join,
-		// so stats and the LIKE ranking cover only the scoped libraries.
+		// The user_library join already enforces current permissions; this predicate
+		// additionally narrows results and statistics to the requested libraries.
 		sq = sq.Where(artistLibraryIdFilter("library_id", scope))
 	}
 	var res dbArtists
-	err := r.doSearch(ctx, sq, q, &res, r.searchCfg(scope), opts)
+	err := r.doSearch(ctx, sq, q, &res, r.searchCfg())
 	if err != nil {
 		return nil, fmt.Errorf("searching artist %q: %w", q, err)
 	}
 	artists := res.toModels()
 	r.hydrateArtwork(ctx, artists)
 	return artists, nil
-}
-
-// searchScope returns the library IDs the search must be restricted to, or nil to skip the filter
-// entirely (the fast-path: the user sees everything the search could return, so a filter would be
-// pure O(offset) overhead). It intersects the requested libraries with what the user can see.
-func (r *artistRepository) searchScope(ctx context.Context, filter Sqlizer) []int {
-	visible, err := r.visibleLibraryIDs(ctx)
-	if err != nil {
-		return r.requestedLibraryIDs(filter) // fail safe: narrow to the request rather than widen
-	}
-	requested := r.requestedLibraryIDs(filter)
-	if requested == nil {
-		// No explicit request: scope to the visible set, unless the user sees everything.
-		if r.userSeesAllLibraries(ctx, visible) {
-			return nil
-		}
-		return visible
-	}
-	// Narrow unless the request already covers everything the user can see. Compare by membership,
-	// not length: the requested IDs may contain duplicates.
-	requestedSet := slice.ToSet(requested)
-	if slices.ContainsFunc(visible, func(id int) bool { _, ok := requestedSet[id]; return !ok }) {
-		return requested
-	}
-	return nil
 }
 
 // requestedLibraryIDs extracts the []int from an Eq{"library_id": ids} filter, or nil if filter is
@@ -743,9 +519,9 @@ func (r *artistRepository) sortMappingsForRole(options ...rest.QueryOptions) map
 		}
 	}
 	mappings := maps.Clone(r.sortMappings)
-	mappings["song_count"] = "sum(stats->>'" + role + "'->>'m')"
-	mappings["album_count"] = "sum(stats->>'" + role + "'->>'a')"
-	mappings["size"] = "sum(stats->>'" + role + "'->>'s')"
+	mappings["song_count"] = "sum(coalesce((library_artist.stats #>> '{" + role + ",m}')::bigint, 0))"
+	mappings["album_count"] = "sum(coalesce((library_artist.stats #>> '{" + role + ",a}')::bigint, 0))"
+	mappings["size"] = "sum(coalesce((library_artist.stats #>> '{" + role + ",s}')::bigint, 0))"
 	return mappings
 }
 

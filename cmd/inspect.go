@@ -90,8 +90,9 @@ func runInspector(ctx context.Context, args []string) {
 
 // loadLibraries reads the libraries, so each file gets its library's PID config. It never creates a DB.
 func loadLibraries(ctx context.Context) model.Libraries {
-	if dbFile, ok := existingDBFile(); !ok {
-		log.Warn(ctx, "No database found, using the global PID config", "path", dbFile)
+	exists, err := db.Exists(ctx)
+	if err != nil || !exists {
+		log.Warn(ctx, "No initialized PostgreSQL schema; using the global PID config", err)
 		return nil
 	}
 	defer db.Init(ctx)()

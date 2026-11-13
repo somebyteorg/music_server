@@ -76,7 +76,7 @@ func (s *maintenanceService) RemapMissingFile(ctx context.Context, missingID, ta
 
 	oldAlbumID, newAlbumID := missing.AlbumID, target.AlbumID
 
-	err = s.ds.WithTx(func(tx model.DataStore) error {
+	err = s.ds.WithTx(ctx, func(tx model.DataStore) error {
 		discardedID := target.ID
 
 		// Preserve the original created_at so the remapped track doesn't resurface in "Recently Added"
@@ -144,7 +144,7 @@ func (s *maintenanceService) deleteMissing(ctx context.Context, ids []string) er
 	}
 
 	// Delete missing files within a transaction
-	err = s.ds.WithTx(func(tx model.DataStore) error {
+	err = s.ds.WithTx(ctx, func(tx model.DataStore) error {
 		if len(ids) == 0 {
 			_, err := tx.MediaFile().DeleteAllMissing(ctx)
 			return err

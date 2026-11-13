@@ -398,9 +398,7 @@ var _ = BeforeSuite(func() {
 	ctx = request.WithUser(GinkgoT().Context(), adminUser)
 })
 
-// Close the database before the suite's TempDir cleanup runs. Required on
-// Windows where open SQLite handles hold file locks that block temp-dir
-// removal; harmless on other OSes.
+// Stop the shared PostgreSQL pool after the suite.
 var _ = AfterSuite(func() {
 	db.Close(ctx)
 })

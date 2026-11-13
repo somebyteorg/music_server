@@ -21,6 +21,7 @@ import (
 	"github.com/dustin/go-humanize"
 	"github.com/go-viper/encoding/ini"
 	"github.com/go-viper/mapstructure/v2"
+	"github.com/jackc/pgx/v5"
 	"github.com/kr/pretty"
 	"github.com/navidrome/navidrome/consts"
 	"github.com/navidrome/navidrome/log"
@@ -39,7 +40,9 @@ type configOptions struct {
 	MusicFolder                     string
 	DataFolder                      Dir
 	CacheFolder                     Dir
-	DbPath                          string
+	DatabaseURL                     string
+	DatabaseSchema                  string
+	DatabaseMaxConnections          int
 	LogLevel                        string
 	LogFile                         string
 	SessionTimeout                  time.Duration
@@ -402,8 +405,11 @@ func Load(noConfigDump bool) {
 	}
 
 	Server.ConfigFile = viper.GetViper().ConfigFileUsed()
-	if Server.DbPath == "" {
-		Server.DbPath = filepath.Join(Server.DataFolder.String(), consts.DefaultDbPath)
+	if Server.DatabaseURL == "" {
+		Server.DatabaseURL = consts.DefaultDatabaseURL
+	}
+	if Server.DatabaseSchema == "" {
+		Server.DatabaseSchema = "navidrome"
 	}
 
 	out := os.Stderr
@@ -451,6 +457,7 @@ func Load(noConfigDump bool) {
 	logUnknownOptions()
 
 	err = run.Sequentially(
+		validateDatabaseConfiguration,
 		validateScanSchedule,
 		validateBackupSchedule,
 		validatePlaylistsPath,
@@ -817,6 +824,28 @@ func disableExternalServices() {
 	}
 }
 
+var databaseSchemaPattern = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,62}$`)
+
+func validateDatabaseConfiguration() error {
+	connection, err := url.Parse(Server.DatabaseURL)
+	if err != nil || (connection.Scheme != "postgres" && connection.Scheme != "postgresql") {
+		return fmt.Errorf("DatabaseURL must be a PostgreSQL connection URL")
+	}
+	if _, err := pgx.ParseConfig(Server.DatabaseURL); err != nil {
+		return fmt.Errorf("invalid PostgreSQL connection settings")
+	}
+	if !databaseSchemaPattern.MatchString(Server.DatabaseSchema) {
+		return fmt.Errorf("DatabaseSchema must be a lowercase PostgreSQL identifier of at most 63 characters")
+	}
+	if strings.HasPrefix(Server.DatabaseSchema, "pg_") || Server.DatabaseSchema == "information_schema" {
+		return fmt.Errorf("DatabaseSchema cannot be a PostgreSQL system schema")
+	}
+	if Server.DatabaseMaxConnections < 0 {
+		return fmt.Errorf("DatabaseMaxConnections must be zero (automatic) or positive")
+	}
+	return nil
+}
+
 func validatePlaylistsPath() error {
 	for path := range strings.SplitSeq(Server.PlaylistsPath, string(filepath.ListSeparator)) {
 		_, err := doublestar.Match(path, "")
@@ -973,6 +1002,9 @@ func hasNDEnvVars() bool {
 }
 
 func setViperDefaults() {
+	viper.SetDefault("databaseurl", consts.DefaultDatabaseURL)
+	viper.SetDefault("databaseschema", "navidrome")
+	viper.SetDefault("databasemaxconnections", 0)
 	viper.SetDefault("musicfolder", filepath.Join(".", "music"))
 	viper.SetDefault("cachefolder", "")
 	viper.SetDefault("datafolder", ".")
@@ -1135,8 +1167,8 @@ func setViperDefaults() {
 	viper.SetDefault("devartworkthrottlebackloglimit", consts.RequestThrottleBacklogLimit)
 	viper.SetDefault("devartworkthrottlebacklogtimeout", consts.RequestThrottleBacklogTimeout)
 	viper.SetDefault("devartworkthrottlebuffered", true)
-	// Half the CPU count (min 2), so local resolution scales with the host but stays under the
-	// SQLite pool (MaxOpenConns) — leaving connections for the scanner, scrobbles and the UI.
+	// Local artwork resolution scales with the CPU count. Database work shares the
+	// PostgreSQL pool with the scanner, scrobbles and the UI.
 	viper.SetDefault("devartworkworkerconcurrency", max(2, runtime.NumCPU()/2))
 	// External RPS gates outbound calls to third-party services (per service); it is bounded by
 	// their tolerance, not the host, so it stays a small constant regardless of CPU count.
@@ -1209,13 +1241,10 @@ func getConfigFile(cfgFile string) string {
 	return ""
 }
 
-// MaxOpenConns is the size of the shared SQLite connection pool, used by every subsystem (scanner,
-// Subsonic, Jellyfin, native API, UI).
-//
-// It bounds concurrent *readers*: SQLite serializes writers on a single database-wide write lock, so
-// more connections buy no write parallelism. A connection is held while blocked on disk I/O or on a
-// slow HTTP client, neither of which is CPU-bound — the CPU-bound knob is DevScannerThreads — so the
-// count is only loosely related to core count, and the floor is what matters on small machines.
+// MaxOpenConns bounds the shared PostgreSQL pool, including background jobs.
 func MaxOpenConns() int {
-	return max(4, runtime.NumCPU())
+	if Server.DatabaseMaxConnections > 0 {
+		return Server.DatabaseMaxConnections
+	}
+	return min(32, max(8, runtime.NumCPU()))
 }

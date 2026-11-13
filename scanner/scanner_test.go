@@ -6,14 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sync/atomic"
 	"testing/fstest"
 	"time"
 
 	"github.com/Masterminds/squirrel"
 	"github.com/google/uuid"
-	"github.com/mattn/go-sqlite3"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/navidrome/navidrome/conf"
 	"github.com/navidrome/navidrome/conf/configtest"
 	"github.com/navidrome/navidrome/consts"
@@ -22,7 +21,6 @@ import (
 	"github.com/navidrome/navidrome/core/playlists"
 	"github.com/navidrome/navidrome/core/storage/storagetest"
 	"github.com/navidrome/navidrome/db"
-	"github.com/navidrome/navidrome/log"
 	"github.com/navidrome/navidrome/model"
 	"github.com/navidrome/navidrome/model/request"
 	"github.com/navidrome/navidrome/persistence"
@@ -60,9 +58,6 @@ var _ = Describe("Scanner", Ordered, func() {
 		tmpDir, err := os.MkdirTemp("", "scanner-test")
 		Expect(err).ToNot(HaveOccurred())
 		DeferCleanup(func() { _ = os.RemoveAll(tmpDir) })
-		conf.Server.DbPath = filepath.Join(tmpDir, "test-scanner.db?_journal_mode=WAL")
-		log.Warn("Using DB at " + conf.Server.DbPath)
-		//conf.Server.DbPath = ":memory:"
 		db.Db().SetMaxOpenConns(1)
 	})
 
@@ -71,7 +66,7 @@ var _ = Describe("Scanner", Ordered, func() {
 		conf.Server.MusicFolder = "fake:///music" // Set to match test library path
 		conf.Server.DevExternalScanner = false
 
-		db.Init(ctx)
+		tests.InitDB(ctx)
 		DeferCleanup(func() {
 			Expect(tests.ClearDB()).To(Succeed())
 		})
@@ -397,7 +392,7 @@ var _ = Describe("Scanner", Ordered, func() {
 			// Backdate the previous scan so this one's new artists are unambiguously newer:
 			// RefreshStats picks touched artists with a strict artist.updated_at >
 			// library.last_scan_at, and Windows' coarse clock can put both in one tick.
-			_, err := db.Db().ExecContext(ctx, "UPDATE library SET last_scan_at = ?", time.Now().Add(-time.Hour))
+			_, err := db.Db().ExecContext(ctx, "UPDATE library SET last_scan_at = $1", time.Now().Add(-time.Hour))
 			Expect(err).ToNot(HaveOccurred())
 			Expect(runScanner(ctx, false)).To(Succeed())
 			resolveQueuedArtwork()
@@ -434,7 +429,7 @@ var _ = Describe("Scanner", Ordered, func() {
 			Expect(runScanner(ctx, true)).To(Succeed())
 			Expect(searchNormalized()).To(Equal("GOGGS"))
 
-			// Simulate the stale value left by the FTS5 migration's SQL back-fill
+			// Simulate a stale search index requiring a full refresh
 			_, err := db.Db().ExecContext(ctx, "UPDATE artist SET search_normalized = '' WHERE name = 'GØGGS'")
 			Expect(err).ToNot(HaveOccurred())
 
@@ -444,7 +439,7 @@ var _ = Describe("Scanner", Ordered, func() {
 			// can capture both within one clock tick on Windows (coarse wall-clock), making
 			// the refresh flaky. Backdating forces the comparison to be unambiguous.
 			_, err = db.Db().ExecContext(ctx,
-				"UPDATE folder SET updated_at = ?", time.Now().Add(-time.Hour))
+				"UPDATE folder SET updated_at = $1", time.Now().Add(-time.Hour))
 			Expect(err).ToNot(HaveOccurred())
 
 			Expect(runScanner(ctx, true)).To(Succeed())
@@ -1266,7 +1261,7 @@ var _ = Describe("Scanner", Ordered, func() {
 		It("gives up and stops walking the library when the database stays busy", func() {
 			busyDS.failures.Store(1000)
 
-			Expect(runScanner(ctx, true)).To(MatchError(ContainSubstring("database is locked")))
+			Expect(runScanner(ctx, true)).To(MatchError(ContainSubstring("SQLSTATE 40001")))
 
 			Expect(mfRepo.cursorCalls.Load()).To(BeNumerically("<", 30))
 		})
@@ -1283,7 +1278,7 @@ var _ = Describe("Scanner", Ordered, func() {
 	})
 })
 
-// busyPersistDS fails the scanner's folder saves with SQLITE_BUSY, as if WithTxRetry ran out of retries.
+// busyPersistDS fails the scanner's folder saves with a serialization failure after transaction retries are exhausted.
 type busyPersistDS struct {
 	*tests.MockDataStore
 	failures atomic.Int32
@@ -1291,7 +1286,7 @@ type busyPersistDS struct {
 
 func (b *busyPersistDS) WithTxRetry(ctx context.Context, block func(context.Context, model.DataStore) error, label ...string) error {
 	if len(label) > 0 && label[0] == "scanner: persist changes" && b.failures.Add(-1) >= 0 {
-		return sqlite3.Error{Code: sqlite3.ErrBusy}
+		return &pgconn.PgError{Code: "40001"}
 	}
 	return b.MockDataStore.WithTxRetry(ctx, block, label...)
 }

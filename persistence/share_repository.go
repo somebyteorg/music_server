@@ -2,15 +2,10 @@ package persistence
 
 import (
 	"context"
-	"fmt"
-	"strings"
-	"time"
 
 	. "github.com/Masterminds/squirrel"
 	"github.com/deluan/rest"
-	"github.com/navidrome/navidrome/log"
 	"github.com/navidrome/navidrome/model"
-	"github.com/navidrome/navidrome/model/request"
 	"github.com/pocketbase/dbx"
 )
 
@@ -33,7 +28,7 @@ func (r *shareRepository) Delete(ctx context.Context, ids ...string) error {
 }
 
 func (r *shareRepository) selectShare(ctx context.Context, options ...model.QueryOptions) SelectBuilder {
-	return r.newSelect(ctx, options...).Join("user u on u.id = share.user_id").
+	return r.newSelect(ctx, options...).Join("app_user u on u.id = share.user_id").
 		Columns("share.*", "user_name as username").
 		Where(r.addRestriction(ctx))
 }
@@ -49,8 +44,9 @@ func (r *shareRepository) Get(ctx context.Context, id string) (*model.Share, err
 	if err != nil {
 		return nil, err
 	}
-	err = r.loadMedia(ctx, &res)
-	return &res, err
+	shares := model.Shares{res}
+	err = r.hydrateShares(ctx, shares)
+	return &shares[0], err
 }
 
 func (r *shareRepository) GetAll(ctx context.Context, options ...model.QueryOptions) (model.Shares, error) {
@@ -60,105 +56,16 @@ func (r *shareRepository) GetAll(ctx context.Context, options ...model.QueryOpti
 	if err != nil {
 		return nil, err
 	}
-	for i := range res {
-		err = r.loadMedia(ctx, &res[i])
-		if err != nil {
-			return nil, fmt.Errorf("error loading media for share %s: %w", res[i].ID, err)
-		}
+	if err := r.hydrateShares(ctx, res); err != nil {
+		return nil, err
 	}
-	return res, err
-}
-
-func (r *shareRepository) loadMedia(ctx context.Context, share *model.Share) error {
-	ids := strings.Split(share.ResourceIDs, ",")
-	if len(ids) == 0 {
-		return nil
-	}
-	noMissing := func(cond Sqlizer) Sqlizer {
-		return And{cond, Eq{"missing": false}}
-	}
-	// Load as the share owner so their library access is applied, whoever renders the share.
-	ownerCtx, err := r.ownerContext(ctx, share)
-	if err != nil {
-		return err
-	}
-	switch share.ResourceType {
-	case "artist":
-		// Match by album-artist participation, not the deprecated album_artist_id
-		// column (first album artist only), so co-album-artists are included too.
-		albumRepo := NewAlbumRepository(r.db)
-		share.Albums, err = albumRepo.GetAll(ownerCtx, model.QueryOptions{Filters: noMissing(ParticipantIDFilter("album", ids, model.RoleAlbumArtist)), Sort: "artist"})
-		if err != nil {
-			return err
-		}
-		mfRepo := NewMediaFileRepository(r.db)
-		share.Tracks, err = mfRepo.GetAll(ownerCtx, model.QueryOptions{Filters: noMissing(ParticipantIDFilter("media_file", ids, model.RoleAlbumArtist)), Sort: "artist"})
-		return err
-	case "album":
-		albumRepo := NewAlbumRepository(r.db)
-		share.Albums, err = albumRepo.GetAll(ownerCtx, model.QueryOptions{Filters: noMissing(Eq{"album.id": ids})})
-		if err != nil {
-			return err
-		}
-		mfRepo := NewMediaFileRepository(r.db)
-		share.Tracks, err = mfRepo.GetAll(ownerCtx, model.QueryOptions{Filters: noMissing(Eq{"album_id": ids}), Sort: "album"})
-		return err
-	case "playlist":
-		plsRepo := NewPlaylistRepository(r.db)
-		// Tracks returns nil when the playlist is no longer visible to the owner
-		// (e.g. it was made private after the share was created); leave the share
-		// with no tracks rather than exposing it.
-		trackRepo := plsRepo.Tracks(ownerCtx, ids[0], true)
-		if trackRepo == nil {
-			return nil
-		}
-		tracks, err := trackRepo.GetAll(ownerCtx, model.QueryOptions{Sort: "id", Filters: noMissing(Eq{})})
-		if err != nil {
-			return err
-		}
-		share.Tracks = tracks.MediaFiles()
-		return nil
-	case "media_file":
-		mfRepo := NewMediaFileRepository(r.db)
-		tracks, err := mfRepo.GetAll(ownerCtx, model.QueryOptions{Filters: noMissing(Eq{"media_file.id": ids})})
-		share.Tracks = sortByIdPosition(tracks, ids)
-		return err
-	}
-	log.Warn(ctx, "Unsupported Share ResourceType", "share", share.ID, "resourceType", share.ResourceType)
-	return nil
-}
-
-// ownerContext returns a context scoped to the share owner, so repository
-// queries apply the owner's library access when a public share is rendered.
-func (r *shareRepository) ownerContext(ctx context.Context, share *model.Share) (context.Context, error) {
-	owner, err := NewUserRepository(r.db).Get(ctx, share.UserID)
-	if err != nil {
-		return nil, fmt.Errorf("loading share owner %q: %w", share.UserID, err)
-	}
-	if owner == nil {
-		return nil, fmt.Errorf("share owner %q not found", share.UserID)
-	}
-	return request.WithUser(ctx, *owner), nil
-}
-
-func sortByIdPosition(mfs model.MediaFiles, ids []string) model.MediaFiles {
-	m := map[string]int{}
-	for i, mf := range mfs {
-		m[mf.ID] = i
-	}
-	var sorted model.MediaFiles
-	for _, id := range ids {
-		if idx, ok := m[id]; ok {
-			sorted = append(sorted, mfs[idx])
-		}
-	}
-	return sorted
+	return res, nil
 }
 
 func (r *shareRepository) Update(ctx context.Context, id string, entity model.Share, cols ...string) error {
 	s := &entity
 	s.ID = id
-	s.UpdatedAt = time.Now()
+	s.UpdatedAt = databaseNow()
 	if len(cols) > 0 {
 		cols = append(cols, "updated_at")
 	}
@@ -173,8 +80,8 @@ func (r *shareRepository) Save(ctx context.Context, s *model.Share) (string, err
 	if u.ID != invalidUserId || s.UserID == "" {
 		s.UserID = u.ID
 	}
-	s.CreatedAt = time.Now()
-	s.UpdatedAt = time.Now()
+	s.CreatedAt = databaseNow()
+	s.UpdatedAt = databaseNow()
 	return r.put(ctx, s.ID, s)
 }
 

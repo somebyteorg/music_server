@@ -15,7 +15,7 @@ set -e
 # cross-compilation target, unlike `uname -m`, which would report the build host.
 arch=$(xx-info arch 2>/dev/null || go env GOARCH)
 
-tags="netgo,sqlite_fts5"
+tags="netgo"
 case "${arch}" in
     arm | 386) tags="${tags},nodynamic" ;;
 esac

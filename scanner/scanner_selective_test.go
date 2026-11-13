@@ -15,7 +15,6 @@ import (
 	"github.com/navidrome/navidrome/core/playlists"
 	"github.com/navidrome/navidrome/core/storage/storagetest"
 	"github.com/navidrome/navidrome/db"
-	"github.com/navidrome/navidrome/log"
 	"github.com/navidrome/navidrome/model"
 	"github.com/navidrome/navidrome/model/request"
 	"github.com/navidrome/navidrome/persistence"
@@ -35,11 +34,7 @@ var _ = Describe("ScanFolders", Ordered, func() {
 	var fsys storagetest.FakeFS
 
 	BeforeAll(func() {
-		tests.SkipOnWindows("SQLite file lock blocks TempDir cleanup (#TBD-path-sep-scanner)")
 		ctx = request.WithUser(GinkgoT().Context(), model.User{ID: "123", IsAdmin: true})
-		tmpDir := GinkgoT().TempDir()
-		conf.Server.DbPath = filepath.Join(tmpDir, "test-selective-scan.db?_journal_mode=WAL")
-		log.Warn("Using DB at " + conf.Server.DbPath)
 		db.Db().SetMaxOpenConns(1)
 	})
 
@@ -48,7 +43,7 @@ var _ = Describe("ScanFolders", Ordered, func() {
 		conf.Server.MusicFolder = "fake:///music"
 		conf.Server.DevExternalScanner = false
 
-		db.Init(ctx)
+		tests.InitDB(ctx)
 		DeferCleanup(func() {
 			Expect(tests.ClearDB()).To(Succeed())
 		})

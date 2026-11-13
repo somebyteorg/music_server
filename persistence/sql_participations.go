@@ -24,7 +24,7 @@ type flatParticipant struct {
 }
 
 // ParticipantIDFilter matches rows of table where the artist participates in any of the given roles
-// (any role when empty). Semi-joins <table>_artists; json_tree over the JSON is far slower at scale.
+// (any role when empty), using the indexed credit tables.
 func ParticipantIDFilter(table string, artistID any, roles ...model.Role) Sqlizer {
 	return participantIDFilter(table, artistID, false, roles)
 }
@@ -35,7 +35,11 @@ func NotParticipantIDFilter(table string, artistID any, roles ...model.Role) Sql
 }
 
 func participantIDFilter(table string, artistID any, negate bool, roles []model.Role) Sqlizer {
-	sel := Select(table + "_id").From(table + "_artists").Where(Eq{"artist_id": artistID})
+	var condition Sqlizer = Eq{"artist_id": artistID}
+	if ids, ok := artistID.([]string); ok {
+		condition = stringIDsFilter("artist_id", ids)
+	}
+	sel := Select(table + "_id").From(table + "_artists").Where(condition)
 	if len(roles) > 0 {
 		sel = sel.Where(Eq{"role": slice.Map(roles, func(r model.Role) string { return r.String() })})
 	}
@@ -104,21 +108,12 @@ func (r sqlRepository) updateParticipants(ctx context.Context, itemID string, pa
 		return fmt.Errorf("marshaling participants: %w", err)
 	}
 
-	// Build the INSERT query using json_each and INNER JOIN to artist table
-	// to automatically filter out non-existent artist IDs
 	query := fmt.Sprintf(`
-		INSERT INTO %[1]s_artists (%[1]s_id, artist_id, role, sub_role)
-		SELECT ?, 
-		       json_extract(value, '$.artist_id') as artist_id,
-		       json_extract(value, '$.role') as role,
-		       COALESCE(json_extract(value, '$.sub_role'), '') as sub_role
-		-- Parse the flat JSON array: [{"artist_id": "id", "role": "role", "sub_role": "subRole"}]
-		FROM json_each(?)                                        -- Iterate through each array element
-		-- CRITICAL: Only insert records for artists that actually exist in the database
-		JOIN artist ON artist.id = json_extract(value, '$.artist_id')  -- Filter out non-existent artist IDs via INNER JOIN
-		-- Handle duplicate insertions gracefully (e.g., if called multiple times)
-		ON CONFLICT (artist_id, %[1]s_id, role, sub_role) DO NOTHING   -- Ignore duplicates
-	`, r.tableName)
+        INSERT INTO %[1]s_artists (%[1]s_id, artist_id, role, sub_role)
+        SELECT ?, entry.artist_id, entry.role, COALESCE(entry.sub_role, '')
+        FROM jsonb_to_recordset(CAST(? AS jsonb)) AS entry(artist_id text, role text, sub_role text)
+        JOIN artist ON artist.id = entry.artist_id
+        ON CONFLICT (artist_id, %[1]s_id, role, sub_role) DO NOTHING`, r.tableName)
 
 	_, err = r.executeSQL(ctx, Expr(query, itemID, string(participantsJSON)))
 	return err
@@ -143,4 +138,13 @@ func (r *sqlRepository) getParticipants(ctx context.Context, m *model.MediaFile)
 		}
 	}
 	return p, nil
+}
+
+// ParticipantNameFilter resolves participant names through the indexed credit tables.
+func ParticipantNameFilter(table, name string, roles ...model.Role) Sqlizer {
+	cond := And{Expr("lower(artist.name) = lower(?)", name), Expr("credit." + table + "_id = " + table + ".id")}
+	if len(roles) > 0 {
+		cond = append(cond, Eq{"credit.role": slice.Map(roles, func(role model.Role) string { return role.String() })})
+	}
+	return Exists(table+"_artists credit JOIN artist ON artist.id = credit.artist_id", cond)
 }

@@ -1,6 +1,7 @@
 package plugins
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -53,12 +54,10 @@ var _ = Describe("Scrobble Retriever Host Function", Ordered, func() {
 		tmpDir, err = os.MkdirTemp("", "scrobble-retriever-test-*")
 		Expect(err).ToNot(HaveOccurred())
 
-		conf.Server.DbPath = filepath.Join(tmpDir, "test-scanner.db?_journal_mode=WAL")
-
-		db.Init(ctx)
-		DeferCleanup(func() {
-			Expect(tests.ClearDB()).To(Succeed())
-		})
+		tests.InitDB(ctx)
+		snapshot, err := tests.CaptureDatabase(ctx)
+		Expect(err).ToNot(HaveOccurred())
+		DeferCleanup(func() { Expect(snapshot.Restore(context.Background())).To(Succeed()) })
 		dataStore = &tests.MockDataStore{RealDS: persistence.New(db.Db())}
 
 		// Copy test plugin to temp dir

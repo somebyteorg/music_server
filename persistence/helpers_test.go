@@ -102,21 +102,21 @@ var _ = Describe("Helpers", func() {
 				Expect(mapSortOrder("album", "ORDER_ALBUM_NAME asc")).To(Equal(expected))
 			},
 			Entry("qualified column", false, false,
-				"(album.order_album_name collate nocase) asc"),
+				"(lower(album.order_album_name)) asc"),
 			Entry("natural collation", false, true,
-				"(album.order_album_name collate NATSORT) asc"),
+				"(lower(album.order_album_name) collate nd_natural) asc"),
 			Entry("sort tags preferred", true, false,
-				`(coalesce(nullif(album.sort_album_name,''),album.order_album_name) collate nocase) asc`),
+				`(lower(coalesce(nullif(album.sort_album_name,''),album.order_album_name))) asc`),
 			Entry("sort tags preferred, natural collation", true, true,
-				`(coalesce(nullif(album.sort_album_name,''),album.order_album_name) collate NATSORT) asc`),
+				`(lower(coalesce(nullif(album.sort_album_name,''),album.order_album_name)) collate nd_natural) asc`),
 		)
 
 		It("changes multiple order columns to sort expressions", func() {
 			conf.Server.PreferSortTags = true
 			sort := "compilation, order_title asc, order_album_artist_name desc, year desc"
 			Expect(mapSortOrder("album", sort)).To(Equal(
-				`compilation, (coalesce(nullif(album.sort_title,''),album.order_title) collate nocase) asc,` +
-					` (coalesce(nullif(album.sort_album_artist_name,''),album.order_album_artist_name) collate nocase) desc, year desc`))
+				`compilation, (lower(coalesce(nullif(album.sort_title,''),album.order_title))) asc,` +
+					` (lower(coalesce(nullif(album.sort_album_artist_name,''),album.order_album_artist_name))) desc, year desc`))
 		})
 	})
 
@@ -131,7 +131,7 @@ var _ = Describe("Helpers", func() {
 
 		It("applies the natural collation when enabled", func() {
 			conf.Server.EnableNaturalSorting = true
-			Expect(naturalSort("media_file.title")).To(Equal("(media_file.title collate NATSORT)"))
+			Expect(naturalSort("media_file.title")).To(Equal("(lower(media_file.title) collate nd_natural)"))
 		})
 	})
 })

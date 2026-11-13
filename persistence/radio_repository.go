@@ -2,7 +2,6 @@ package persistence
 
 import (
 	"context"
-	"time"
 
 	. "github.com/Masterminds/squirrel"
 	"github.com/deluan/rest"
@@ -87,9 +86,9 @@ func (r *radioRepository) Put(ctx context.Context, radio *model.Radio, colsToUpd
 		return rest.ErrPermissionDenied
 	}
 
-	radio.UpdatedAt = time.Now()
+	radio.UpdatedAt = databaseNow()
 	if radio.ID == "" {
-		radio.CreatedAt = time.Now()
+		radio.CreatedAt = databaseNow()
 		radio.ID = id.NewRandom()
 	}
 	if len(colsToUpdate) > 0 {

@@ -82,6 +82,12 @@ func runScanner(ctx context.Context) {
 	sqlDB := db.Db()
 	defer db.Db().Close()
 	ds := persistence.New(sqlDB)
+	if !subprocess {
+		requireExistingDB()
+		if err := ds.Library().StoreMusicFolder(ctx); err != nil {
+			log.Fatal(ctx, "Cannot update music library", err)
+		}
+	}
 	pls := playlists.NewPlaylists(ds, artwork.NewUploader(ds))
 
 	// Parse targets from command line or file

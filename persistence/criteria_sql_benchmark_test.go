@@ -4,18 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/Masterminds/squirrel"
-	"github.com/navidrome/navidrome/conf"
-	"github.com/navidrome/navidrome/conf/configtest"
 	"github.com/navidrome/navidrome/db"
 	"github.com/navidrome/navidrome/log"
 	"github.com/navidrome/navidrome/model"
 	"github.com/navidrome/navidrome/model/criteria"
 	"github.com/navidrome/navidrome/model/request"
+	"github.com/navidrome/navidrome/tests"
 	"github.com/pocketbase/dbx"
 )
 
@@ -28,13 +26,13 @@ const (
 
 // BenchmarkSmartPlaylistRole compares role-based smart playlist query performance
 // between the current implementation (merged join-table via criteria pipeline) and
-// the old baseline (unmerged json_tree subqueries).
+// the old baseline (unmerged JSONB subqueries).
 func BenchmarkSmartPlaylistRole(b *testing.B) {
-	configtest.SetupConfig()
-	tmpDir := b.TempDir()
-	conf.Server.DbPath = filepath.Join(tmpDir, "bench-smartpl.db")
-	cleanup := db.Init(context.Background())
-	defer cleanup()
+	tests.Init(b, false)
+	if err := tests.ClearDB(); err != nil {
+		b.Fatal(err)
+	}
+	tests.InitDB(context.Background())
 	log.SetLevel(log.LevelFatal)
 
 	conn := dbx.NewFromDB(db.Db(), db.Dialect)
@@ -55,8 +53,8 @@ func BenchmarkSmartPlaylistRole(b *testing.B) {
 	b.Run("Current", func(b *testing.B) {
 		benchmarkCriteriaPipeline(b, ctx, expr)
 	})
-	b.Run("Baseline_UnmergedJSONTree", func(b *testing.B) {
-		benchmarkUnmergedJSONTree(b, ctx)
+	b.Run("Baseline_UnmergedJSONB", func(b *testing.B) {
+		benchmarkUnmergedJSONB(b, ctx)
 	})
 }
 
@@ -65,11 +63,11 @@ func BenchmarkSmartPlaylistRole(b *testing.B) {
 // between the current implementation (merged NOT EXISTS via criteria pipeline) and the
 // old baseline (one separate NOT EXISTS subquery per pattern).
 func BenchmarkSmartPlaylistNegatedRole(b *testing.B) {
-	configtest.SetupConfig()
-	tmpDir := b.TempDir()
-	conf.Server.DbPath = filepath.Join(tmpDir, "bench-smartpl-neg.db")
-	cleanup := db.Init(context.Background())
-	defer cleanup()
+	tests.Init(b, false)
+	if err := tests.ClearDB(); err != nil {
+		b.Fatal(err)
+	}
+	tests.InitDB(context.Background())
 	log.SetLevel(log.LevelFatal)
 
 	conn := dbx.NewFromDB(db.Db(), db.Dialect)
@@ -91,13 +89,13 @@ func BenchmarkSmartPlaylistNegatedRole(b *testing.B) {
 		benchmarkCriteriaPipeline(b, ctx, expr)
 	})
 	b.Run("Baseline_UnmergedNotExists", func(b *testing.B) {
-		benchmarkUnmergedNegatedJSONTree(b, ctx)
+		benchmarkUnmergedNegatedJSONB(b, ctx)
 	})
 }
 
-// benchmarkUnmergedNegatedJSONTree builds the old-style query with N separate negated
-// json_tree EXISTS subqueries ANDed together (the pre-optimization baseline).
-func benchmarkUnmergedNegatedJSONTree(b *testing.B, ctx context.Context) {
+// benchmarkUnmergedNegatedJSONB builds the old-style query with N separate negated
+// JSONB EXISTS subqueries ANDed together (the pre-optimization baseline).
+func benchmarkUnmergedNegatedJSONB(b *testing.B, ctx context.Context) {
 	b.Helper()
 
 	var sb strings.Builder
@@ -107,7 +105,7 @@ func benchmarkUnmergedNegatedJSONTree(b *testing.B, ctx context.Context) {
 		if i > 0 {
 			sb.WriteString(" AND ")
 		}
-		sb.WriteString("not exists (select 1 from json_tree(media_file.participants, '$.artist') where key='name' and value = ?)")
+		sb.WriteString("not exists (select 1 from jsonb_to_recordset(coalesce(media_file.participants->'artist', '[]'::jsonb)) AS participant(name text) where name = ?)")
 		args = append(args, fmt.Sprintf("Artist %04d", i))
 	}
 	sb.WriteString(") ORDER BY media_file.title LIMIT 500")
@@ -144,9 +142,9 @@ func benchmarkCriteriaPipeline(b *testing.B, ctx context.Context, expr criteria.
 	runBenchQuery(b, ctx, query, args)
 }
 
-// benchmarkUnmergedJSONTree builds the old-style query with N separate json_tree EXISTS
+// benchmarkUnmergedJSONB builds the old-style query with N separate JSONB EXISTS
 // subqueries (the pre-optimization baseline).
-func benchmarkUnmergedJSONTree(b *testing.B, ctx context.Context) {
+func benchmarkUnmergedJSONB(b *testing.B, ctx context.Context) {
 	b.Helper()
 
 	var sb strings.Builder
@@ -156,7 +154,7 @@ func benchmarkUnmergedJSONTree(b *testing.B, ctx context.Context) {
 		if i > 0 {
 			sb.WriteString(" OR ")
 		}
-		sb.WriteString("exists (select 1 from json_tree(media_file.participants, '$.artist') where key='name' and value LIKE ?)")
+		sb.WriteString("exists (select 1 from jsonb_to_recordset(coalesce(media_file.participants->'artist', '[]'::jsonb)) AS participant(name text) where name ILIKE ?)")
 		args = append(args, fmt.Sprintf("%%Artist %04d%%", i))
 	}
 	sb.WriteString(") ORDER BY media_file.title LIMIT 500")
@@ -167,6 +165,10 @@ func benchmarkUnmergedJSONTree(b *testing.B, ctx context.Context) {
 func runBenchQuery(b *testing.B, ctx context.Context, query string, args []any) {
 	b.Helper()
 	sqlDB := db.Db()
+	query, args, err := db.PositionalParams(query, args)
+	if err != nil {
+		b.Fatal(err)
+	}
 	b.ResetTimer()
 	for range b.N {
 		rows, err := sqlDB.QueryContext(ctx, query, args...)
@@ -203,7 +205,7 @@ func setupBenchData(b *testing.B, ctx context.Context, conn *dbx.DB, user model.
 	}
 
 	// Create artists
-	artistStmt, err := tx.Prepare("INSERT INTO artist (id, name) VALUES (?, ?)")
+	artistStmt, err := tx.Prepare("INSERT INTO artist (id, name) VALUES ($1, $2)")
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -216,20 +218,20 @@ func setupBenchData(b *testing.B, ctx context.Context, conn *dbx.DB, user model.
 
 	// Ensure folder exists
 	folderID := "bench-folder"
-	if _, err := tx.Exec("INSERT OR IGNORE INTO folder (id, library_id, path, name, parent_id) VALUES (?, 1, '.', '.', '')", folderID); err != nil {
+	if _, err := tx.Exec("INSERT INTO folder (id, library_id, path, name, parent_id) VALUES ($1, 1, '.', '.', '') ON CONFLICT DO NOTHING", folderID); err != nil {
 		b.Fatal(err)
 	}
 
 	// Create media files with participants JSON, cycling through artists
 	mfStmt, err := tx.Prepare(`INSERT INTO media_file (id, path, title, album, artist, artist_id, album_id,
 		duration, year, size, suffix, tags, participants, lyrics, library_id, folder_id, pid, codec)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`)
 	if err != nil {
 		b.Fatal(err)
 	}
 
 	// Populate media_file_artists join table
-	mfaStmt, err := tx.Prepare("INSERT INTO media_file_artists (media_file_id, artist_id, role, sub_role) VALUES (?, ?, ?, ?)")
+	mfaStmt, err := tx.Prepare("INSERT INTO media_file_artists (media_file_id, artist_id, role, sub_role) VALUES ($1, $2, $3, $4)")
 	if err != nil {
 		b.Fatal(err)
 	}

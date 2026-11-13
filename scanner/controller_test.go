@@ -27,7 +27,7 @@ var _ = Describe("Controller", func() {
 	Describe("Status", func() {
 		BeforeEach(func() {
 			ctx = context.Background()
-			db.Init(ctx)
+			tests.InitDB(ctx)
 			DeferCleanup(func() { Expect(tests.ClearDB()).To(Succeed()) })
 			DeferCleanup(configtest.SetupConfig())
 			ds = &tests.MockDataStore{RealDS: persistence.New(db.Db())}

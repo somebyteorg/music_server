@@ -11,7 +11,7 @@ import (
 const (
 	AppName = "navidrome"
 
-	DefaultDbPath                 = "navidrome.db?cache=shared&_busy_timeout=15000&_journal_mode=WAL&_foreign_keys=on&synchronous=normal"
+	DefaultDatabaseURL            = "postgres://postgres:postgres@127.0.0.1:5432/emos_music_server?sslmode=disable"
 	InitialSetupFlagKey           = "InitialSetup"
 	FullScanAfterMigrationFlagKey = "FullScanAfterMigration"
 	// PlaylistsImportPendingFlagKey marks that playlist import was deferred because

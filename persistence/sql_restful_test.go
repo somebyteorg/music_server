@@ -58,7 +58,7 @@ var _ = Describe("sqlRestful", func() {
 
 		It("returns a 'like' condition for other filters", func() {
 			options.Filters = map[string]any{"name": "joe"}
-			Expect(r.parseRestFilters(context.Background(), options)).To(Equal(squirrel.And{squirrel.Like{"name": "joe%"}}))
+			Expect(r.parseRestFilters(context.Background(), options)).To(Equal(squirrel.And{squirrel.ILike{"name": "joe%"}}))
 		})
 
 		It("uses the custom filter", func() {
@@ -105,7 +105,7 @@ var _ = Describe("sqlRestful", func() {
 				// mbidExpr with no fields returns nil, so cmp.Or falls back to search strategy
 				sql, args, err := result.ToSql()
 				Expect(err).ToNot(HaveOccurred())
-				Expect(sql).To(ContainSubstring("test_table.full_text LIKE"))
+				Expect(sql).To(ContainSubstring("test_table.full_text ILIKE"))
 				Expect(args).To(ContainElement("% 550e8400-e29b-41d4-a716-446655440000%"))
 			})
 		})
@@ -117,7 +117,7 @@ var _ = Describe("sqlRestful", func() {
 				// mbidExpr returns nil for non-UUIDs, so search strategy result is returned directly
 				sql, args, err := result.ToSql()
 				Expect(err).ToNot(HaveOccurred())
-				Expect(sql).To(ContainSubstring("test_table.full_text LIKE"))
+				Expect(sql).To(ContainSubstring("test_table.full_text ILIKE"))
 				Expect(args).To(ContainElement("% beatles%"))
 			})
 
@@ -126,8 +126,8 @@ var _ = Describe("sqlRestful", func() {
 
 				sql, args, err := result.ToSql()
 				Expect(err).ToNot(HaveOccurred())
-				// All words should be present as LIKE conditions
-				Expect(sql).To(ContainSubstring("test_table.full_text LIKE"))
+				// All words should be present as ILIKE conditions
+				Expect(sql).To(ContainSubstring("test_table.full_text ILIKE"))
 				Expect(args).To(HaveLen(4))
 				Expect(args).To(ContainElement("% the%"))
 				Expect(args).To(ContainElement("% beatles%"))
@@ -143,7 +143,7 @@ var _ = Describe("sqlRestful", func() {
 
 				sql, args, err := result.ToSql()
 				Expect(err).ToNot(HaveOccurred())
-				Expect(sql).To(ContainSubstring("test_table.full_text LIKE"))
+				Expect(sql).To(ContainSubstring("test_table.full_text ILIKE"))
 				Expect(args).To(HaveLen(2))
 				Expect(args).To(ContainElement("% test%"))
 				Expect(args).To(ContainElement("% query%"))
@@ -155,7 +155,7 @@ var _ = Describe("sqlRestful", func() {
 
 				sql, args, err := result.ToSql()
 				Expect(err).ToNot(HaveOccurred())
-				Expect(sql).To(ContainSubstring("test_table.full_text LIKE"))
+				Expect(sql).To(ContainSubstring("test_table.full_text ILIKE"))
 				Expect(args).To(HaveLen(2))
 				Expect(args).To(ContainElement("%test%"))
 				Expect(args).To(ContainElement("%query%"))
@@ -181,7 +181,7 @@ var _ = Describe("sqlRestful", func() {
 				Expect(result).ToNot(BeNil(), "single-char REST filter must not be dropped")
 				sql, args, err := result.ToSql()
 				Expect(err).ToNot(HaveOccurred())
-				Expect(sql).To(ContainSubstring("MATCH"))
+				Expect(sql).To(ContainSubstring("@@ to_tsquery"))
 				Expect(args).ToNot(BeEmpty())
 			})
 		})
@@ -202,7 +202,7 @@ var _ = Describe("sqlRestful", func() {
 
 				sql, args, err := result.ToSql()
 				Expect(err).ToNot(HaveOccurred())
-				Expect(sql).To(ContainSubstring("test_table.full_text LIKE"))
+				Expect(sql).To(ContainSubstring("test_table.full_text ILIKE"))
 				Expect(args).To(ContainElement("% dont%"))
 			})
 
@@ -229,7 +229,7 @@ var _ = Describe("sqlRestful", func() {
 				// Should return full text filter since UUID is invalid
 				sql, args, err := result.ToSql()
 				Expect(err).ToNot(HaveOccurred())
-				Expect(sql).To(ContainSubstring("test_table.full_text LIKE"))
+				Expect(sql).To(ContainSubstring("test_table.full_text ILIKE"))
 				Expect(args).To(ContainElement("% 550e8400-invalid-uuid%"))
 			})
 
@@ -240,7 +240,7 @@ var _ = Describe("sqlRestful", func() {
 				// mbidExpr with empty fields returns nil, so search strategy result is returned directly
 				sql, args, err := result.ToSql()
 				Expect(err).ToNot(HaveOccurred())
-				Expect(sql).To(ContainSubstring("test_table.full_text LIKE"))
+				Expect(sql).To(ContainSubstring("test_table.full_text ILIKE"))
 				Expect(args).To(ContainElement("% test%"))
 			})
 
@@ -249,7 +249,7 @@ var _ = Describe("sqlRestful", func() {
 
 				sql, args, err := result.ToSql()
 				Expect(err).ToNot(HaveOccurred())
-				Expect(sql).To(ContainSubstring("test_table.full_text LIKE"))
+				Expect(sql).To(ContainSubstring("test_table.full_text ILIKE"))
 				Expect(args).To(ContainElement("% test%"))
 			})
 		})

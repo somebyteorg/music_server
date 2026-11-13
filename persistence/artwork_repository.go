@@ -41,7 +41,7 @@ func (r *artworkRepository) GetImage(ctx context.Context, hash string) (*model.A
 
 func (r *artworkRepository) PutImage(ctx context.Context, a *model.Artwork) error {
 	// created_at is the last-acquisition-write time the prune grace window keys on.
-	a.CreatedAt = time.Now()
+	a.CreatedAt = databaseNow()
 	values, err := toSQLArgs(*a)
 	if err != nil {
 		return err
@@ -110,7 +110,8 @@ func (r *artworkRepository) PurgeDanglingItems(ctx context.Context) (int64, erro
 }
 
 func (r *artworkRepository) GetItemArtwork(ctx context.Context, kind model.Kind, id, imageType string) (*model.ItemArtwork, error) {
-	sel := Select("*").From(itemArtworkTable).
+	sel := Select("item_kind", "item_id", "image_type", "hash", "source", "source_path", "ref_mtime",
+		"trace", "coalesce(last_failure::text, '') AS last_failure", "attempted_at", "updated_at").From(itemArtworkTable).
 		Where(Eq{"item_kind": kind.Prefix(), "item_id": id, "image_type": imageType})
 	var res model.ItemArtwork
 	if err := r.items.queryOne(ctx, sel, &res); err != nil {
@@ -120,8 +121,9 @@ func (r *artworkRepository) GetItemArtwork(ctx context.Context, kind model.Kind,
 }
 
 func (r *artworkRepository) PutItemArtwork(ctx context.Context, ia *model.ItemArtwork) error {
+	ia.Trace = cmp.Or(ia.Trace, "[]")
 	ia.ImageType = cmp.Or(ia.ImageType, model.ImageTypePrimary)
-	ia.UpdatedAt = time.Now()
+	ia.UpdatedAt = databaseNow()
 	// PutItemArtwork records the outcome of an attempt, so an unset attempted_at is now.
 	if ia.AttemptedAt.IsZero() {
 		ia.AttemptedAt = ia.UpdatedAt
@@ -129,6 +131,9 @@ func (r *artworkRepository) PutItemArtwork(ctx context.Context, ia *model.ItemAr
 	values, err := toSQLArgs(*ia)
 	if err != nil {
 		return err
+	}
+	if ia.LastFailure == "" {
+		values["last_failure"] = nil
 	}
 	ins := Insert(itemArtworkTable).SetMap(values).Suffix(`ON CONFLICT (item_kind, item_id, image_type) DO UPDATE SET
 		hash=excluded.hash, source=excluded.source, source_path=excluded.source_path, ref_mtime=excluded.ref_mtime,
@@ -141,7 +146,7 @@ func (r *artworkRepository) PutItemArtwork(ctx context.Context, ia *model.ItemAr
 // PutLastFailure records why an item exhausted its retry budget. It only updates an existing row:
 // inserting one would write an empty hash, which the rest of the system reads as a settled absent.
 func (r *artworkRepository) PutLastFailure(ctx context.Context, kind model.Kind, id, imageType, trace string) error {
-	upd := Update(itemArtworkTable).Set("last_failure", trace).
+	upd := Update(itemArtworkTable).Set("last_failure", cmp.Or(trace, "[]")).
 		Where(Eq{"item_kind": kind.Prefix(), "item_id": id, "image_type": imageType})
 	_, err := r.items.executeSQL(ctx, upd)
 	return err

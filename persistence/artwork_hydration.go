@@ -3,58 +3,12 @@ package persistence
 import (
 	"context"
 	"iter"
-	"slices"
 
-	. "github.com/Masterminds/squirrel"
 	"github.com/navidrome/navidrome/conf"
 	"github.com/navidrome/navidrome/log"
 	"github.com/navidrome/navidrome/model"
 	"github.com/pocketbase/dbx"
 )
-
-// Keeps the id IN-list under SQLite's bound-parameter limit; a whole multiple of artworkBatchSize
-// so a page re-chunks into even hydration batches.
-const artworkChunkSize = artworkBatchSize * 3
-
-// streamByIDs yields rows in id chunks through the caller's hydrating fetch. Resolving ids first
-// keeps OFFSET out of the joined query.
-func streamByIDs[S ~[]T, T any](ids []string, fetch func(chunk []string) (S, error)) iter.Seq2[T, error] {
-	return func(yield func(T, error) bool) {
-		for chunk := range slices.Chunk(ids, artworkChunkSize) {
-			rows, err := fetch(chunk)
-			if err != nil {
-				var zero T
-				yield(zero, err)
-				return
-			}
-			for _, row := range rows {
-				if !yield(row, nil) {
-					return
-				}
-			}
-		}
-	}
-}
-
-// chunkOptions narrows options to a chunk of ids, dropping Max/Offset (the id pre-pass already
-// consumed them) and reusing Sort, which may be a seeded random expression by now.
-func chunkOptions(options []model.QueryOptions, idField string) func([]string) model.QueryOptions {
-	var base model.QueryOptions
-	if len(options) > 0 {
-		base = model.QueryOptions{
-			Sort: options[0].Sort, Order: options[0].Order, SortOrders: options[0].SortOrders,
-			Filters: options[0].Filters,
-		}
-	}
-	return func(chunk []string) model.QueryOptions {
-		opts := base
-		opts.Filters = Eq{idField: chunk}
-		if base.Filters != nil {
-			opts.Filters = And{base.Filters, opts.Filters}
-		}
-		return opts
-	}
-}
 
 // hydrateItemImages returns per-item artwork info in one batched query per kind. On error it logs
 // and returns an empty map, so the page still renders.

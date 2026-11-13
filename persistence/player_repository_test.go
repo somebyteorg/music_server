@@ -436,11 +436,10 @@ var _ = Describe("PlayerRepository", func() {
 
 		Describe("Update (edit)", func() {
 			It("rolls back the key change when the rest of the edit fails", func() {
-				_, err := database.NewQuery(`create trigger fail_player_rename before update of name on player
-					when new.name = 'boom' begin select raise(abort, 'boom'); end`).Execute()
+				_, err := database.NewQuery(`ALTER TABLE player ADD CONSTRAINT fail_player_rename CHECK (name <> 'boom')`).Execute()
 				Expect(err).ToNot(HaveOccurred())
 				DeferCleanup(func() {
-					_, _ = database.NewQuery("drop trigger if exists fail_player_rename").Execute()
+					_, _ = database.NewQuery("ALTER TABLE player DROP CONSTRAINT IF EXISTS fail_player_rename").Execute()
 				})
 
 				plr := regularPlayer

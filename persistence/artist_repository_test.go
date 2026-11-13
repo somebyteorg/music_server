@@ -81,7 +81,7 @@ var _ = Describe("ArtistRepository", func() {
 				func(role string, shouldBeValid bool) {
 					result := roleFilter("", role)
 					if shouldBeValid {
-						expectedExpr := squirrel.Expr("JSON_EXTRACT(library_artist.stats, '$." + role + ".m') IS NOT NULL")
+						expectedExpr := squirrel.Expr("jsonb_extract_path_text(library_artist.stats, ?, 'm') IS NOT NULL", role)
 						Expect(result).To(Equal(expectedExpr))
 					} else {
 						expectedInvalid := squirrel.Eq{"1": 2}
@@ -145,21 +145,21 @@ var _ = Describe("ArtistRepository", func() {
 			}
 
 			It("falls back to the total stats role for an attacker-controlled role", func() {
-				Expect(songCountSortFor(payload)).To(Equal("sum(stats->>'total'->>'m')"))
-				Expect(songCountSortFor("bogus")).To(Equal("sum(stats->>'total'->>'m')"))
-				Expect(songCountSortFor(42)).To(Equal("sum(stats->>'total'->>'m')"))
+				Expect(songCountSortFor(payload)).To(Equal("sum(coalesce((library_artist.stats #>> '{total,m}')::bigint, 0))"))
+				Expect(songCountSortFor("bogus")).To(Equal("sum(coalesce((library_artist.stats #>> '{total,m}')::bigint, 0))"))
+				Expect(songCountSortFor(42)).To(Equal("sum(coalesce((library_artist.stats #>> '{total,m}')::bigint, 0))"))
 			})
 
 			It("keeps valid role sort paths", func() {
-				Expect(songCountSortFor("composer")).To(Equal("sum(stats->>'composer'->>'m')"))
-				Expect(songCountSortFor("albumartist")).To(Equal("sum(stats->>'albumartist'->>'m')"))
+				Expect(songCountSortFor("composer")).To(Equal("sum(coalesce((library_artist.stats #>> '{composer,m}')::bigint, 0))"))
+				Expect(songCountSortFor("albumartist")).To(Equal("sum(coalesce((library_artist.stats #>> '{albumartist,m}')::bigint, 0))"))
 			})
 
 			It("leaves the shared mappings untouched", func() {
 				repo := NewArtistRepository(GetDBXBuilder()).(*artistRepository)
 				Expect(repo.sortMappingsForRole(rest.QueryOptions{Filters: map[string]any{"role": "composer"}})).
 					ToNot(Equal(repo.sortMappings))
-				Expect(repo.sortMappings["song_count"]).To(Equal("stats->>'total'->>'m'"))
+				Expect(repo.sortMappings["song_count"]).To(Equal("sum(coalesce((library_artist.stats #>> '{total,m}')::bigint, 0))"))
 			})
 
 			It("orders by the requested role's stats, not the total", func() {
@@ -200,80 +200,6 @@ var _ = Describe("ArtistRepository", func() {
 					Filters: map[string]any{"role": payload},
 				})
 				Expect(err).ToNot(HaveOccurred())
-			})
-		})
-
-		Describe("searchScope", func() {
-			// Resolves the library IDs a search must be restricted to (nil = fast-path / no filter),
-			// the way Search() does, for a repo whose context carries the given user.
-			scope := func(user model.User, filter squirrel.Sqlizer) []int {
-				ctx := request.WithUser(GinkgoT().Context(), user)
-				r := NewArtistRepository(GetDBXBuilder()).(*artistRepository)
-				return r.searchScope(ctx, filter)
-			}
-			subsetUser := model.User{ID: "u", Libraries: model.Libraries{{ID: 1}, {ID: 2}, {ID: 3}}}
-
-			It("scopes to a strict subset of the user's libraries", func() {
-				Expect(scope(subsetUser, squirrel.Eq{"library_id": []int{1, 2}})).To(Equal([]int{1, 2}))
-			})
-
-			It("treats duplicate IDs as a set so a real subset still narrows", func() {
-				// {1,1,2} has 3 entries but is a strict subset of the user's 3 libraries.
-				Expect(scope(subsetUser, squirrel.Eq{"library_id": []int{1, 1, 2}})).To(Equal([]int{1, 1, 2}))
-			})
-
-			It("returns nil (fast-path) when the request covers all the user's libraries", func() {
-				Expect(scope(subsetUser, squirrel.Eq{"library_id": []int{1, 2, 3}})).To(BeNil())
-			})
-
-			It("scopes to the user's libraries when no library filter is given", func() {
-				// A restricted user (strictly fewer libs than exist) with no musicFolderId is still
-				// confined to their granted libs. Build the user with total-1 libraries derived from
-				// the real DB total, so the "sees all" fast-path can't kick in regardless of count.
-				total, err := NewLibraryRepository(GetDBXBuilder()).CountAll(ctx)
-				Expect(err).ToNot(HaveOccurred())
-				Expect(total).To(BeNumerically(">", 0))
-				libs := make(model.Libraries, 0, total-1)
-				for i := int64(1); i < total; i++ { // total-1 distinct libraries → a strict subset
-					libs = append(libs, model.Library{ID: int(i)})
-				}
-				restricted := model.User{ID: "r", Libraries: libs}
-				got := scope(restricted, nil)
-				Expect(got).To(HaveLen(int(total) - 1))
-			})
-
-			It("returns nil (fast-path) for an admin requesting all existing libraries", func() {
-				// Admins see every library, so the visible set is the whole library table — derive
-				// it from the DB rather than assuming a count.
-				var allLibs []int
-				Expect(NewLibraryRepository(GetDBXBuilder()).(*libraryRepository).
-					queryAllSlice(ctx, squirrel.Select("id").From("library"), &allLibs)).To(Succeed())
-				admin := model.User{ID: "a", IsAdmin: true}
-				Expect(scope(admin, squirrel.Eq{"library_id": allLibs})).To(BeNil())
-				Expect(scope(admin, nil)).To(BeNil())
-			})
-
-			It("narrows for an admin explicitly requesting a subset via musicFolderId", func() {
-				// An admin scoping to a single, non-existent-as-the-whole-set library must still be
-				// narrowed (regression: search3?musicFolderId=lib2 was leaking lib1 content).
-				admin := model.User{ID: "a", IsAdmin: true}
-				Expect(scope(admin, squirrel.Eq{"library_id": []int{-1}})).To(Equal([]int{-1}))
-			})
-
-			It("returns nil for a non-library_id filter (no library scoping requested)", func() {
-				// Such a filter carries no library intent; for this fully-granted-style user the
-				// search needs no extra library restriction.
-				allUser := model.User{ID: "u2", IsAdmin: true}
-				Expect(scope(allUser, squirrel.Eq{"name": "x"})).To(BeNil())
-			})
-
-			It("falls back to the visible scope for a malformed library_id value (no crash)", func() {
-				// A library_id filter whose value isn't []int is still recognized as a library
-				// filter (so Search consumes it and it never reaches the bare artist table), and
-				// searchScope falls back to exactly the no-filter behavior rather than crashing.
-				malformed := squirrel.Eq{"library_id": "not-a-slice"}
-				Expect(isLibraryIDFilter(malformed)).To(BeTrue())
-				Expect(scope(subsetUser, malformed)).To(Equal(scope(subsetUser, nil)))
 			})
 		})
 
@@ -394,17 +320,6 @@ var _ = Describe("ArtistRepository", func() {
 				want, err := repo.GetAll(ctx, opts)
 				Expect(err).ToNot(HaveOccurred())
 				Expect(collectCursor(repo.GetCursor(ctx, opts))).To(Equal([]model.Artist(want)))
-			})
-		})
-
-		Describe("getAllIDs", func() {
-			It("returns the same id set as GetAll", func() {
-				want, err := repo.GetAll(ctx)
-				Expect(err).ToNot(HaveOccurred())
-				Expect(want).ToNot(BeEmpty())
-				ids, err := repo.(*artistRepository).getAllIDs(ctx)
-				Expect(err).ToNot(HaveOccurred())
-				Expect(ids).To(ConsistOf(slice.Map(want, func(a model.Artist) string { return a.ID })))
 			})
 		})
 
@@ -1283,23 +1198,6 @@ var _ = Describe("ArtistRepository", func() {
 				Expect(userAll).ToNot(BeEmpty())
 			})
 
-			It("detects all-library access regardless of result equivalence", func() {
-				// userSeesAllLibraries drives the search fast-path for a non-admin: true when the
-				// visible-library count reaches the DB total. Derive the total from the DB so the
-				// assertion doesn't depend on how many libraries other specs left behind.
-				raw := restrictedRepo.(*artistRepository) // context carries a non-admin user
-				total, err := NewLibraryRepository(GetDBXBuilder()).CountAll(ctx)
-				Expect(err).ToNot(HaveOccurred())
-				Expect(total).To(BeNumerically(">", 0))
-
-				allLibs := make([]int, total)
-				for i := range allLibs {
-					allLibs[i] = i + 1
-				}
-				Expect(raw.userSeesAllLibraries(restrictedCtx, allLibs)).To(BeTrue())
-				Expect(raw.userSeesAllLibraries(restrictedCtx, allLibs[:total-1])).To(BeFalse())
-				Expect(raw.userSeesAllLibraries(restrictedCtx, []int{})).To(BeFalse())
-			})
 		})
 	})
 

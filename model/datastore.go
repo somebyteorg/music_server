@@ -41,10 +41,9 @@ type DataStore interface {
 	Artwork() ArtworkRepository
 	ArtworkQueue() ArtworkQueueRepository
 
-	WithTx(block func(tx DataStore) error, scope ...string) error
-	WithTxImmediate(block func(tx DataStore) error, scope ...string) error
-	// WithTxRetry runs block in a transaction, rerunning it while SQLite reports the database busy.
-	// For background work only (it can take minutes), and block must be safe to rerun after a rollback.
+	WithTx(ctx context.Context, block func(tx DataStore) error, scope ...string) error
+	// WithTxRetry runs block in a transaction, retrying PostgreSQL serialization failures and deadlocks.
+	// For background work only (it may retry), and block must be safe to rerun after a rollback.
 	WithTxRetry(ctx context.Context, block func(ctx context.Context, tx DataStore) error, scope ...string) error
 	GC(ctx context.Context, libraryIDs ...int) error
 }

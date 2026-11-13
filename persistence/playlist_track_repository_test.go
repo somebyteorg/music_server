@@ -12,8 +12,8 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-// sqliteMaxVariables is SQLITE_MAX_VARIABLE_NUMBER as compiled into the driver
-const sqliteMaxVariables = 32766
+// largeDeleteBatch exercises deleting a collection larger than a single SQL batch.
+const largeDeleteBatch = 32766
 
 var _ = Describe("PlaylistTrackRepository", func() {
 	var repo model.PlaylistTrackRepository
@@ -248,8 +248,8 @@ var _ = Describe("PlaylistTrackRepository", func() {
 			Expect(remaining[0].ID).To(Equal("1"), "the surviving track must be renumbered to position 1")
 		})
 
-		It("accepts more ids than SQLite allows as bind variables", func() {
-			Expect(tracks.Delete(ctx, positionsUpTo(sqliteMaxVariables+100)...)).To(Succeed())
+		It("accepts a large batch of track positions", func() {
+			Expect(tracks.Delete(ctx, positionsUpTo(largeDeleteBatch+100)...)).To(Succeed())
 
 			Expect(tracks.CountAll(ctx)).To(BeZero())
 		})

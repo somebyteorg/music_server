@@ -30,7 +30,7 @@ var _ = Describe("Smart playlist criteria SQL", func() {
 		},
 		Entry("all group",
 			criteria.All{criteria.Contains{"title": "love"}, criteria.Gt{"rating": 3}},
-			"(media_file.title LIKE ? AND annotation.rating > ?)", "%love%", 3),
+			"(CAST(media_file.title AS text) ILIKE ? AND annotation.rating > ?)", "%love%", 3),
 		Entry("any group",
 			criteria.Any{criteria.Is{"title": "Low Rider"}, criteria.Is{"album": "Best Of"}},
 			"(media_file.title = ? OR media_file.album = ?)", "Low Rider", "Best Of"),
@@ -40,18 +40,18 @@ var _ = Describe("Smart playlist criteria SQL", func() {
 		Entry("is not", criteria.IsNot{"title": "Low Rider"}, "media_file.title <> ?", "Low Rider"),
 		Entry("gt", criteria.Gt{"playCount": 10}, "annotation.play_count > ?", 10),
 		Entry("lt", criteria.Lt{"playCount": 10}, "(annotation.play_count < ? OR annotation.play_count IS NULL)", 10),
-		Entry("contains", criteria.Contains{"title": "Low Rider"}, "media_file.title LIKE ?", "%Low Rider%"),
-		Entry("not contains", criteria.NotContains{"title": "Low Rider"}, "media_file.title NOT LIKE ?", "%Low Rider%"),
-		Entry("starts with", criteria.StartsWith{"title": "Low Rider"}, "media_file.title LIKE ?", "Low Rider%"),
-		Entry("ends with", criteria.EndsWith{"title": "Low Rider"}, "media_file.title LIKE ?", "%Low Rider"),
+		Entry("contains", criteria.Contains{"title": "Low Rider"}, "CAST(media_file.title AS text) ILIKE ?", "%Low Rider%"),
+		Entry("not contains", criteria.NotContains{"title": "Low Rider"}, "CAST(media_file.title AS text) NOT ILIKE ?", "%Low Rider%"),
+		Entry("starts with", criteria.StartsWith{"title": "Low Rider"}, "CAST(media_file.title AS text) ILIKE ?", "Low Rider%"),
+		Entry("ends with", criteria.EndsWith{"title": "Low Rider"}, "CAST(media_file.title AS text) ILIKE ?", "%Low Rider"),
 		Entry("in range", criteria.InTheRange{"year": []int{1980, 1990}}, "(media_file.year >= ? AND media_file.year <= ?)", 1980, 1990),
 		Entry("before", criteria.Before{"lastPlayed": time.Date(2021, 10, 1, 0, 0, 0, 0, time.Local)}, "annotation.play_date < ?", time.Date(2021, 10, 1, 0, 0, 0, 0, time.Local)),
 		Entry("after", criteria.After{"lastPlayed": time.Date(2021, 10, 1, 0, 0, 0, 0, time.Local)}, "annotation.play_date > ?", time.Date(2021, 10, 1, 0, 0, 0, 0, time.Local)),
-		Entry("in playlist [path]", criteria.InPlaylist{"path": "lacuslacus.nsp"}, "media_file.id IN (SELECT media_file_id FROM playlist_tracks pl LEFT JOIN playlist on pl.playlist_id = playlist.id WHERE (playlist.path IN (?) AND playlist.public = ?))", "lacuslacus.nsp", 1),
-		Entry("in playlist [id]", criteria.InPlaylist{"id": "deadbeef-dead-beef"}, "media_file.id IN (SELECT media_file_id FROM playlist_tracks pl LEFT JOIN playlist on pl.playlist_id = playlist.id WHERE (pl.playlist_id = ? AND playlist.public = ?))", "deadbeef-dead-beef", 1),
-		Entry("in playlist [empty id falls back to path]", criteria.InPlaylist{"id": "", "path": "/music/x.nsp"}, "media_file.id IN (SELECT media_file_id FROM playlist_tracks pl LEFT JOIN playlist on pl.playlist_id = playlist.id WHERE (playlist.path IN (?) AND playlist.public = ?))", "/music/x.nsp", 1),
-		Entry("in playlist [decomposed unicode path]", criteria.InPlaylist{"path": "/m\u00fasica/x.nsp"}, "media_file.id IN (SELECT media_file_id FROM playlist_tracks pl LEFT JOIN playlist on pl.playlist_id = playlist.id WHERE (playlist.path IN (?,?) AND playlist.public = ?))", "/m\u00fasica/x.nsp", "/mu\u0301sica/x.nsp", 1),
-		Entry("not in playlist", criteria.NotInPlaylist{"id": "deadbeef-dead-beef"}, "media_file.id NOT IN (SELECT media_file_id FROM playlist_tracks pl LEFT JOIN playlist on pl.playlist_id = playlist.id WHERE (pl.playlist_id = ? AND playlist.public = ?))", "deadbeef-dead-beef", 1),
+		Entry("in playlist [path]", criteria.InPlaylist{"path": "lacuslacus.nsp"}, "media_file.id IN (SELECT media_file_id FROM playlist_tracks pl LEFT JOIN playlist on pl.playlist_id = playlist.id WHERE (playlist.path IN (?) AND playlist.public = ?))", "lacuslacus.nsp", true),
+		Entry("in playlist [id]", criteria.InPlaylist{"id": "deadbeef-dead-beef"}, "media_file.id IN (SELECT media_file_id FROM playlist_tracks pl LEFT JOIN playlist on pl.playlist_id = playlist.id WHERE (pl.playlist_id = ? AND playlist.public = ?))", "deadbeef-dead-beef", true),
+		Entry("in playlist [empty id falls back to path]", criteria.InPlaylist{"id": "", "path": "/music/x.nsp"}, "media_file.id IN (SELECT media_file_id FROM playlist_tracks pl LEFT JOIN playlist on pl.playlist_id = playlist.id WHERE (playlist.path IN (?) AND playlist.public = ?))", "/music/x.nsp", true),
+		Entry("in playlist [decomposed unicode path]", criteria.InPlaylist{"path": "/m\u00fasica/x.nsp"}, "media_file.id IN (SELECT media_file_id FROM playlist_tracks pl LEFT JOIN playlist on pl.playlist_id = playlist.id WHERE (playlist.path IN (?,?) AND playlist.public = ?))", "/m\u00fasica/x.nsp", "/mu\u0301sica/x.nsp", true),
+		Entry("not in playlist", criteria.NotInPlaylist{"id": "deadbeef-dead-beef"}, "media_file.id NOT IN (SELECT media_file_id FROM playlist_tracks pl LEFT JOIN playlist on pl.playlist_id = playlist.id WHERE (pl.playlist_id = ? AND playlist.public = ?))", "deadbeef-dead-beef", true),
 		Entry("album annotation", criteria.Gt{"albumRating": 3}, "album_annotation.rating > ?", 3),
 		Entry("artist annotation", criteria.Is{"artistLoved": true}, "artist_annotation.starred = ?", true),
 		Entry("album column", criteria.Gt{"albumSongCount": 5}, "album.song_count > ?", 5),
@@ -86,14 +86,14 @@ var _ = Describe("Smart playlist criteria SQL", func() {
 		// semantics, so the COALESCE form is kept to stay equivalent to the original.
 		Entry("is list keeps coalesce", criteria.Is{"playCount": []int{0, 3}},
 			"COALESCE(annotation.play_count, 0) IN (?,?)", 0, 3),
-		// LIKE operators can't use the column index, so annotation fields keep the COALESCE form to
-		// match missing-annotation rows exactly as before (a NULL column never matches LIKE).
+		// ILIKE operators can't use the column index, so annotation fields keep the COALESCE form to
+		// match missing-annotation rows exactly as before (a NULL column never matches ILIKE).
 		Entry("contains annotation keeps coalesce", criteria.Contains{"playCount": 0},
-			"COALESCE(annotation.play_count, 0) LIKE ?", "%0%"),
+			"CAST(COALESCE(annotation.play_count, 0) AS text) ILIKE ?", "%0%"),
 		Entry("starts with annotation keeps coalesce", criteria.StartsWith{"rating": 5},
-			"COALESCE(annotation.rating, 0) LIKE ?", "5%"),
+			"CAST(COALESCE(annotation.rating, 0) AS text) ILIKE ?", "5%"),
 		Entry("not contains annotation keeps coalesce", criteria.NotContains{"playCount": 0},
-			"COALESCE(annotation.play_count, 0) NOT LIKE ?", "%0%"),
+			"CAST(COALESCE(annotation.play_count, 0) AS text) NOT ILIKE ?", "%0%"),
 		// Bool annotation fields only have a clean index-friendly form for equality; ordering
 		// comparators keep the COALESCE form so the missing-row default is honored exactly.
 		Entry("gt bool keeps coalesce", criteria.Gt{"loved": false},
@@ -102,25 +102,25 @@ var _ = Describe("Smart playlist criteria SQL", func() {
 		// numeric list case) — otherwise a NULL column would diverge from the original.
 		Entry("is bool list keeps coalesce", criteria.Is{"loved": []any{true}},
 			"COALESCE(annotation.starred, false) IN (?)", true),
-		Entry("tag is", criteria.Is{"genre": "Rock"}, "exists (select 1 from json_tree(media_file.tags, '$.genre') where key='value' and value = ?)", "Rock"),
-		Entry("tag is not", criteria.IsNot{"genre": "Rock"}, "not exists (select 1 from json_tree(media_file.tags, '$.genre') where key='value' and value = ?)", "Rock"),
-		Entry("tag contains", criteria.Contains{"genre": "Rock"}, "exists (select 1 from json_tree(media_file.tags, '$.genre') where key='value' and value LIKE ?)", "%Rock%"),
-		Entry("tag not contains", criteria.NotContains{"genre": "Rock"}, "not exists (select 1 from json_tree(media_file.tags, '$.genre') where key='value' and value LIKE ?)", "%Rock%"),
-		Entry("numeric tag", criteria.Lt{"rate": 6}, "exists (select 1 from json_tree(media_file.tags, '$.rate') where key='value' and CAST(value AS REAL) < ?)", 6),
-		Entry("tag alias", criteria.Is{"albumtype": "album"}, "exists (select 1 from json_tree(media_file.tags, '$.releasetype') where key='value' and value = ?)", "album"),
+		Entry("tag is", criteria.Is{"genre": "Rock"}, "exists (select 1 from jsonb_to_recordset(coalesce(media_file.tags -> ?, '[]'::jsonb)) as tag_values(id text, value text) where value = ?)", "genre", "Rock"),
+		Entry("tag is not", criteria.IsNot{"genre": "Rock"}, "not exists (select 1 from jsonb_to_recordset(coalesce(media_file.tags -> ?, '[]'::jsonb)) as tag_values(id text, value text) where value = ?)", "genre", "Rock"),
+		Entry("tag contains", criteria.Contains{"genre": "Rock"}, "exists (select 1 from jsonb_to_recordset(coalesce(media_file.tags -> ?, '[]'::jsonb)) as tag_values(id text, value text) where value ILIKE ?)", "genre", "%Rock%"),
+		Entry("tag not contains", criteria.NotContains{"genre": "Rock"}, "not exists (select 1 from jsonb_to_recordset(coalesce(media_file.tags -> ?, '[]'::jsonb)) as tag_values(id text, value text) where value ILIKE ?)", "genre", "%Rock%"),
+		Entry("numeric tag", criteria.Lt{"rate": 6}, "exists (select 1 from jsonb_to_recordset(coalesce(media_file.tags -> ?, '[]'::jsonb)) as tag_values(id text, value text) where (CASE WHEN value ~ '^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$' THEN CAST(value AS double precision) END) < ?)", "rate", 6),
+		Entry("tag alias", criteria.Is{"albumtype": "album"}, "exists (select 1 from jsonb_to_recordset(coalesce(media_file.tags -> ?, '[]'::jsonb)) as tag_values(id text, value text) where value = ?)", "releasetype", "album"),
 		Entry("field alias via tag registration", criteria.Is{"recordingdate": "2024-01-01"}, "media_file.date = ?", "2024-01-01"),
 		Entry("role is", criteria.Is{"artist": "u2"}, "exists (select 1 from media_file_artists mfa join artist on artist.id = mfa.artist_id where mfa.media_file_id = media_file.id and mfa.role = ? and artist.name = ?)", "artist", "u2"),
-		Entry("role contains", criteria.Contains{"composer": "Lennon"}, "exists (select 1 from media_file_artists mfa join artist on artist.id = mfa.artist_id where mfa.media_file_id = media_file.id and mfa.role = ? and artist.name LIKE ?)", "composer", "%Lennon%"),
-		Entry("role not contains", criteria.NotContains{"artist": "u2"}, "not exists (select 1 from media_file_artists mfa join artist on artist.id = mfa.artist_id where mfa.media_file_id = media_file.id and mfa.role = ? and artist.name LIKE ?)", "artist", "%u2%"),
+		Entry("role contains", criteria.Contains{"composer": "Lennon"}, "exists (select 1 from media_file_artists mfa join artist on artist.id = mfa.artist_id where mfa.media_file_id = media_file.id and mfa.role = ? and artist.name ILIKE ?)", "composer", "%Lennon%"),
+		Entry("role not contains", criteria.NotContains{"artist": "u2"}, "not exists (select 1 from media_file_artists mfa join artist on artist.id = mfa.artist_id where mfa.media_file_id = media_file.id and mfa.role = ? and artist.name ILIKE ?)", "artist", "%u2%"),
 		// ReplayGain fields
 		Entry("rgAlbumGain is", criteria.Is{"rgAlbumGain": 0}, "media_file.rg_album_gain = ?", 0),
 		Entry("rgAlbumGain gt", criteria.Gt{"rgAlbumGain": -6.0}, "media_file.rg_album_gain > ?", -6.0),
 		Entry("rgTrackPeak lt", criteria.Lt{"rgTrackPeak": 1.0}, "media_file.rg_track_peak < ?", 1.0),
 		// isMissing — tags
 		Entry("isMissing tag [true]", criteria.IsMissing{"genre": true},
-			"not exists (select 1 from json_tree(media_file.tags, '$.genre') where key='value')"),
+			"not exists (select 1 from jsonb_to_recordset(coalesce(media_file.tags -> ?, '[]'::jsonb)) as tag_values(id text, value text) where true)", "genre"),
 		Entry("isMissing tag [false]", criteria.IsMissing{"genre": false},
-			"exists (select 1 from json_tree(media_file.tags, '$.genre') where key='value')"),
+			"exists (select 1 from jsonb_to_recordset(coalesce(media_file.tags -> ?, '[]'::jsonb)) as tag_values(id text, value text) where true)", "genre"),
 		// isMissing — roles
 		Entry("isMissing role [true]", criteria.IsMissing{"artist": true},
 			"not exists (select 1 from media_file_artists mfa where mfa.media_file_id = media_file.id and mfa.role = ?)", "artist"),
@@ -128,9 +128,9 @@ var _ = Describe("Smart playlist criteria SQL", func() {
 			"exists (select 1 from media_file_artists mfa where mfa.media_file_id = media_file.id and mfa.role = ?)", "artist"),
 		// isPresent — tags
 		Entry("isPresent tag [true]", criteria.IsPresent{"genre": true},
-			"exists (select 1 from json_tree(media_file.tags, '$.genre') where key='value')"),
+			"exists (select 1 from jsonb_to_recordset(coalesce(media_file.tags -> ?, '[]'::jsonb)) as tag_values(id text, value text) where true)", "genre"),
 		Entry("isPresent tag [false]", criteria.IsPresent{"genre": false},
-			"not exists (select 1 from json_tree(media_file.tags, '$.genre') where key='value')"),
+			"not exists (select 1 from jsonb_to_recordset(coalesce(media_file.tags -> ?, '[]'::jsonb)) as tag_values(id text, value text) where true)", "genre"),
 		// isPresent — roles
 		Entry("isPresent role [true]", criteria.IsPresent{"composer": true},
 			"exists (select 1 from media_file_artists mfa where mfa.media_file_id = media_file.id and mfa.role = ?)", "composer"),
@@ -159,15 +159,15 @@ var _ = Describe("Smart playlist criteria SQL", func() {
 			"(media_file.mbz_album_id IS NOT NULL AND media_file.mbz_album_id <> ?)", ""),
 		Entry("isPresent mbz_album_id [false]", criteria.IsPresent{"mbz_album_id": false},
 			"(media_file.mbz_album_id IS NULL OR media_file.mbz_album_id = ?)", ""),
-		// lyrics: absence is encoded as '' or '[]' (empty serialized LyricList)
+		// Lyrics is absent for an empty JSON array or JSON null.
 		Entry("isMissing lyrics [true]", criteria.IsMissing{"lyrics": true},
-			"(media_file.lyrics IS NULL OR media_file.lyrics = ? OR media_file.lyrics = ?)", "", "[]"),
+			"(media_file.lyrics IS NULL OR media_file.lyrics = ? OR media_file.lyrics = ?)", "[]", "null"),
 		Entry("isPresent lyrics [true]", criteria.IsPresent{"lyrics": true},
-			"(media_file.lyrics IS NOT NULL AND media_file.lyrics <> ? AND media_file.lyrics <> ?)", "", "[]"),
+			"(media_file.lyrics IS NOT NULL AND media_file.lyrics <> ? AND media_file.lyrics <> ?)", "[]", "null"),
 		Entry("isMissing lyrics [false]", criteria.IsMissing{"lyrics": false},
-			"(media_file.lyrics IS NOT NULL AND media_file.lyrics <> ? AND media_file.lyrics <> ?)", "", "[]"),
+			"(media_file.lyrics IS NOT NULL AND media_file.lyrics <> ? AND media_file.lyrics <> ?)", "[]", "null"),
 		Entry("isPresent lyrics [false]", criteria.IsPresent{"lyrics": false},
-			"(media_file.lyrics IS NULL OR media_file.lyrics = ? OR media_file.lyrics = ?)", "", "[]"),
+			"(media_file.lyrics IS NULL OR media_file.lyrics = ? OR media_file.lyrics = ?)", "[]", "null"),
 		// isMissing/isPresent — nullable numeric columns (BPM, BitDepth)
 		Entry("isMissing bpm [true]", criteria.IsMissing{"bpm": true},
 			"(media_file.bpm IS NULL)"),
@@ -213,7 +213,7 @@ var _ = Describe("Smart playlist criteria SQL", func() {
 			sql, args, err := sqlizer.ToSql()
 			Expect(err).ToNot(HaveOccurred())
 			Expect(sql).To(Equal("media_file.id IN (SELECT media_file_id FROM playlist_tracks pl LEFT JOIN playlist on pl.playlist_id = playlist.id WHERE (pl.playlist_id = ? AND (playlist.public = ? OR playlist.owner_id = ?)))"))
-			Expect(args).To(HaveExactElements("deadbeef-dead-beef", 1, "owner-id"))
+			Expect(args).To(HaveExactElements("deadbeef-dead-beef", true, "owner-id"))
 		})
 
 		It("allows all playlist references for admins", func() {
@@ -294,19 +294,19 @@ var _ = Describe("Smart playlist criteria SQL", func() {
 		})
 
 		It("sorts by tag fields", func() {
-			Expect(newSmartPlaylistCriteria(criteria.Criteria{Sort: "genre"}).orderBy()).To(Equal("COALESCE(json_extract(media_file.tags, '$.genre[0].value'), '') asc"))
+			Expect(newSmartPlaylistCriteria(criteria.Criteria{Sort: "genre"}).orderBy()).To(Equal("COALESCE(jsonb_extract_path_text(media_file.tags, 'genre', '0', 'value'), '') asc"))
 		})
 
 		It("sorts by role fields", func() {
-			Expect(newSmartPlaylistCriteria(criteria.Criteria{Sort: "artist"}).orderBy()).To(Equal("COALESCE(json_extract(media_file.participants, '$.artist[0].name'), '') asc"))
+			Expect(newSmartPlaylistCriteria(criteria.Criteria{Sort: "artist"}).orderBy()).To(Equal("COALESCE(jsonb_extract_path_text(media_file.participants, 'artist', '0', 'name'), '') asc"))
 		})
 
 		It("casts numeric tags when sorting", func() {
-			Expect(newSmartPlaylistCriteria(criteria.Criteria{Sort: "rate"}).orderBy()).To(Equal("CAST(COALESCE(json_extract(media_file.tags, '$.rate[0].value'), '') AS REAL) asc"))
+			Expect(newSmartPlaylistCriteria(criteria.Criteria{Sort: "rate"}).orderBy()).To(Equal("(CASE WHEN COALESCE(jsonb_extract_path_text(media_file.tags, 'rate', '0', 'value'), '') ~ '^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$' THEN CAST(COALESCE(jsonb_extract_path_text(media_file.tags, 'rate', '0', 'value'), '') AS double precision) END) asc"))
 		})
 
 		It("sorts by albumtype alias", func() {
-			Expect(newSmartPlaylistCriteria(criteria.Criteria{Sort: "albumtype"}).orderBy()).To(Equal("COALESCE(json_extract(media_file.tags, '$.releasetype[0].value'), '') asc"))
+			Expect(newSmartPlaylistCriteria(criteria.Criteria{Sort: "albumtype"}).orderBy()).To(Equal("COALESCE(jsonb_extract_path_text(media_file.tags, 'releasetype', '0', 'value'), '') asc"))
 		})
 
 		It("sorts by random", func() {
@@ -323,7 +323,7 @@ var _ = Describe("Smart playlist criteria SQL", func() {
 		})
 
 		It("reverts order when order is desc", func() {
-			Expect(newSmartPlaylistCriteria(criteria.Criteria{Sort: "-date,artist", Order: "desc"}).orderBy()).To(Equal("media_file.date asc, COALESCE(json_extract(media_file.participants, '$.artist[0].name'), '') desc"))
+			Expect(newSmartPlaylistCriteria(criteria.Criteria{Sort: "-date,artist", Order: "desc"}).orderBy()).To(Equal("media_file.date asc, COALESCE(jsonb_extract_path_text(media_file.participants, 'artist', '0', 'name'), '') desc"))
 		})
 
 		It("ignores invalid sort fields", func() {
@@ -377,7 +377,7 @@ var _ = Describe("Smart playlist criteria SQL", func() {
 
 			sql, args, err := sqlizer.ToSql()
 			Expect(err).ToNot(HaveOccurred())
-			Expect(sql).To(Equal("(exists (select 1 from media_file_artists mfa join artist on artist.id = mfa.artist_id where mfa.media_file_id = media_file.id and mfa.role = ? and (artist.name LIKE ? OR artist.name LIKE ? OR artist.name LIKE ?)))"))
+			Expect(sql).To(Equal("(exists (select 1 from media_file_artists mfa join artist on artist.id = mfa.artist_id where mfa.media_file_id = media_file.id and mfa.role = ? and (artist.name ILIKE ? OR artist.name ILIKE ? OR artist.name ILIKE ?)))"))
 			Expect(args).To(HaveExactElements("artist", "%Beatles%", "%Kraftwerk%", "%Pink Floyd%"))
 		})
 
@@ -410,7 +410,7 @@ var _ = Describe("Smart playlist criteria SQL", func() {
 			Expect(strings.Count(sql, "not exists")).To(Equal(2))
 		})
 
-		It("batches large groups to avoid SQLite expression tree depth limit", func() {
+		It("batches large groups without exceeding expression depth limits", func() {
 			// Create jsonCondBatchSize + 1 conditions to trigger batching into 2 groups
 			anyExprs := make(criteria.Any, jsonCondBatchSize+1)
 			for i := range anyExprs {
@@ -439,8 +439,8 @@ var _ = Describe("Smart playlist criteria SQL", func() {
 
 			sql, args, err := sqlizer.ToSql()
 			Expect(err).ToNot(HaveOccurred())
-			Expect(sql).To(ContainSubstring("media_file.title LIKE ?"))
-			Expect(sql).To(ContainSubstring("artist.name LIKE ? OR artist.name LIKE ?"))
+			Expect(sql).To(ContainSubstring("CAST(media_file.title AS text) ILIKE ?"))
+			Expect(sql).To(ContainSubstring("artist.name ILIKE ? OR artist.name ILIKE ?"))
 			Expect(args).To(HaveExactElements("%Love%", "artist", "%Beatles%", "%Kraftwerk%"))
 		})
 
@@ -455,8 +455,8 @@ var _ = Describe("Smart playlist criteria SQL", func() {
 
 			sql, args, err := sqlizer.ToSql()
 			Expect(err).ToNot(HaveOccurred())
-			Expect(sql).To(Equal("(exists (select 1 from json_tree(media_file.tags, '$.genre') where key='value' and (value LIKE ? OR value LIKE ? OR value LIKE ?)))"))
-			Expect(args).To(HaveExactElements("%Rock%", "%Metal%", "%Punk%"))
+			Expect(sql).To(Equal("(exists (select 1 from jsonb_to_recordset(coalesce(media_file.tags -> ?, '[]'::jsonb)) as tag_values(id text, value text) where (value ILIKE ? OR value ILIKE ? OR value ILIKE ?)))"))
+			Expect(args).To(HaveExactElements("genre", "%Rock%", "%Metal%", "%Punk%"))
 		})
 
 		It("does not merge tag conditions from different tags", func() {
@@ -499,9 +499,9 @@ var _ = Describe("Smart playlist criteria SQL", func() {
 			Expect(err).ToNot(HaveOccurred())
 			// Two merged EXISTS: one for roles, one for tags
 			Expect(strings.Count(sql, "exists")).To(Equal(2))
-			Expect(sql).To(ContainSubstring("artist.name LIKE ? OR artist.name LIKE ?"))
-			Expect(sql).To(ContainSubstring("value LIKE ? OR value LIKE ?"))
-			Expect(args).To(HaveLen(2 + 2 + 1)) // 2 tag patterns + 2 role patterns + 1 role name
+			Expect(sql).To(ContainSubstring("artist.name ILIKE ? OR artist.name ILIKE ?"))
+			Expect(sql).To(ContainSubstring("value ILIKE ? OR value ILIKE ?"))
+			Expect(args).To(HaveLen(2 + 2 + 2)) // Two tag patterns, two role patterns, and both names.
 		})
 
 		It("merges negated role conditions in an AND group into a single NOT EXISTS", func() {
@@ -531,7 +531,7 @@ var _ = Describe("Smart playlist criteria SQL", func() {
 			sql, args, err := sqlizer.ToSql()
 			Expect(err).ToNot(HaveOccurred())
 			Expect(strings.Count(sql, "not exists")).To(Equal(1))
-			Expect(sql).To(ContainSubstring("artist.name LIKE ? OR artist.name LIKE ?"))
+			Expect(sql).To(ContainSubstring("artist.name ILIKE ? OR artist.name ILIKE ?"))
 			Expect(args).To(HaveExactElements("artist", "%Beatles%", "%Kraftwerk%"))
 		})
 
@@ -546,8 +546,8 @@ var _ = Describe("Smart playlist criteria SQL", func() {
 			sql, args, err := sqlizer.ToSql()
 			Expect(err).ToNot(HaveOccurred())
 			Expect(strings.Count(sql, "not exists")).To(Equal(1))
-			Expect(sql).To(ContainSubstring("value LIKE ? OR value LIKE ?"))
-			Expect(args).To(HaveExactElements("%Rock%", "%Metal%"))
+			Expect(sql).To(ContainSubstring("value ILIKE ? OR value ILIKE ?"))
+			Expect(args).To(HaveExactElements("genre", "%Rock%", "%Metal%"))
 		})
 
 		It("does not merge a single negated condition with a positive one of the same role in AND", func() {
@@ -580,7 +580,7 @@ var _ = Describe("Smart playlist criteria SQL", func() {
 			Expect(strings.Count(sql, "not exists")).To(Equal(2))
 		})
 
-		It("batches large negated AND groups to avoid SQLite expression tree depth limit", func() {
+		It("batches large negated AND groups without exceeding expression depth limits", func() {
 			allExprs := make(criteria.All, jsonCondBatchSize+1)
 			for i := range allExprs {
 				allExprs[i] = criteria.IsNot{"artist": fmt.Sprintf("Artist%d", i)}

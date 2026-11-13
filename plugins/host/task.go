@@ -38,7 +38,7 @@ type QueueConfig struct {
 // TaskService provides persistent task queues for plugins.
 //
 // This service allows plugins to create named queues with configurable concurrency,
-// retry policies, and rate limiting. Tasks are persisted to SQLite and survive
+// retry policies, and rate limiting. Tasks are persisted to PostgreSQL and survive
 // server restarts. When a task is ready to execute, the host calls the plugin's
 // nd_task_execute callback function.
 //

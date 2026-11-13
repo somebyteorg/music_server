@@ -3,7 +3,6 @@ package scanner_test
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"testing/fstest"
 	"time"
 
@@ -16,7 +15,6 @@ import (
 	"github.com/navidrome/navidrome/core/playlists"
 	"github.com/navidrome/navidrome/core/storage/storagetest"
 	"github.com/navidrome/navidrome/db"
-	"github.com/navidrome/navidrome/log"
 	"github.com/navidrome/navidrome/model"
 	"github.com/navidrome/navidrome/model/request"
 	"github.com/navidrome/navidrome/persistence"
@@ -42,11 +40,7 @@ var _ = Describe("Scanner - Multi-Library", Ordered, func() {
 	}
 
 	BeforeAll(func() {
-		tests.SkipOnWindows("SQLite file lock blocks TempDir cleanup (#TBD-path-sep-scanner)")
 		ctx = request.WithUser(GinkgoT().Context(), model.User{ID: "123", IsAdmin: true})
-		tmpDir := GinkgoT().TempDir()
-		conf.Server.DbPath = filepath.Join(tmpDir, "test-scanner-multilibrary.db?_journal_mode=WAL")
-		log.Warn("Using DB at " + conf.Server.DbPath)
 		db.Db().SetMaxOpenConns(1)
 	})
 
@@ -60,7 +54,7 @@ var _ = Describe("Scanner - Multi-Library", Ordered, func() {
 		emptyFS.SetFiles(fstest.MapFS{})
 		storagetest.Register("default", &emptyFS)
 
-		db.Init(ctx)
+		tests.InitDB(ctx)
 		DeferCleanup(func() {
 			Expect(tests.ClearDB()).To(Succeed())
 		})
@@ -228,7 +222,7 @@ var _ = Describe("Scanner - Multi-Library", Ordered, func() {
 					// Check if artist is associated with rock library
 					var count int64
 					err := db.Db().QueryRow(
-						"SELECT COUNT(*) FROM library_artist WHERE library_id = ? AND artist_id = ?",
+						"SELECT COUNT(*) FROM library_artist WHERE library_id = $1 AND artist_id = $2",
 						lib1.ID, artist.ID,
 					).Scan(&count)
 					Expect(err).ToNot(HaveOccurred())
@@ -238,7 +232,7 @@ var _ = Describe("Scanner - Multi-Library", Ordered, func() {
 
 					// Check if artist is associated with jazz library
 					err = db.Db().QueryRow(
-						"SELECT COUNT(*) FROM library_artist WHERE library_id = ? AND artist_id = ?",
+						"SELECT COUNT(*) FROM library_artist WHERE library_id = $1 AND artist_id = $2",
 						lib2.ID, artist.ID,
 					).Scan(&count)
 					Expect(err).ToNot(HaveOccurred())
@@ -374,7 +368,7 @@ var _ = Describe("Scanner - Multi-Library", Ordered, func() {
 
 				// Check rock library association
 				err = db.Db().QueryRow(
-					"SELECT COUNT(*) FROM library_artist WHERE library_id = ? AND artist_id = ?",
+					"SELECT COUNT(*) FROM library_artist WHERE library_id = $1 AND artist_id = $2",
 					lib1.ID, jeffID,
 				).Scan(&rockCount)
 				Expect(err).ToNot(HaveOccurred())
@@ -382,7 +376,7 @@ var _ = Describe("Scanner - Multi-Library", Ordered, func() {
 
 				// Check jazz library association
 				err = db.Db().QueryRow(
-					"SELECT COUNT(*) FROM library_artist WHERE library_id = ? AND artist_id = ?",
+					"SELECT COUNT(*) FROM library_artist WHERE library_id = $1 AND artist_id = $2",
 					lib2.ID, jeffID,
 				).Scan(&jazzCount)
 				Expect(err).ToNot(HaveOccurred())
@@ -864,12 +858,12 @@ var _ = Describe("Scanner - Multi-Library", Ordered, func() {
 		// changeRockInDB edits the rock track in the DB only. A full rescan of the rock library would
 		// restore the title from the file tags, a quick scan leaves it alone.
 		changeRockInDB := func() {
-			_, err := db.Db().ExecContext(ctx, "update media_file set title = 'Changed In DB' where library_id = ?", lib1.ID)
+			_, err := db.Db().ExecContext(ctx, "update media_file set title = 'Changed In DB' where library_id = $1", lib1.ID)
 			Expect(err).ToNot(HaveOccurred())
 		}
 		// changeBlueTrainInDB does the same for one jazz track
 		changeBlueTrainInDB := func() {
-			_, err := db.Db().ExecContext(ctx, "update media_file set title = 'Blue Train In DB' where library_id = ? and title = 'Blue Train'", lib2.ID)
+			_, err := db.Db().ExecContext(ctx, "update media_file set title = 'Blue Train In DB' where library_id = $1 and title = 'Blue Train'", lib2.ID)
 			Expect(err).ToNot(HaveOccurred())
 		}
 
@@ -948,7 +942,7 @@ var _ = Describe("Scanner - Multi-Library", Ordered, func() {
 
 			// Simulate a quick scan of jazz that was interrupted after it had processed every folder:
 			// the folders were updated after the (old) scan start time
-			_, err := db.Db().ExecContext(ctx, "update library set last_scan_started_at = ?, full_scan_in_progress = false where id = ?",
+			_, err := db.Db().ExecContext(ctx, "update library set last_scan_started_at = $1, full_scan_in_progress = false where id = $2",
 				time.Now().Add(-time.Hour), lib2.ID)
 			Expect(err).ToNot(HaveOccurred())
 

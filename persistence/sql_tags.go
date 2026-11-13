@@ -49,7 +49,7 @@ func marshalTags(tags model.Tags) string {
 }
 
 // indexedTagNames are the tag types materialized into the <table>_tags join tables, so filtering by
-// them is an index-backed semi-join instead of a per-row json_tree(tags) scan. Genre only for now.
+// them uses an indexed semi-join instead of expanding each JSON document. Genre only for now.
 var indexedTagNames = []model.TagName{model.TagGenre}
 
 // updateTags rewrites this item's <table>_tags rows from its in-memory tags, mirroring
@@ -74,7 +74,7 @@ func (r sqlRepository) updateTags(ctx context.Context, itemID string, tags model
 	}
 	query := fmt.Sprintf(`
 		INSERT INTO %[1]s_tags (%[1]s_id, tag_id)
-		SELECT ?, value FROM json_each(?)
+		SELECT ?, value FROM jsonb_array_elements_text(CAST(? AS jsonb)) AS entries(value)
 		JOIN tag ON tag.id = value
 		ON CONFLICT (%[1]s_id, tag_id) DO NOTHING`, r.tableName)
 	_, err = r.executeSQL(ctx, Expr(query, itemID, string(idsJSON)))
@@ -100,7 +100,7 @@ func (g genreFilterDef) ByID(tagIDs any) Sqlizer {
 func (g genreFilterDef) ByName(genre string) Sqlizer {
 	sub, args, _ := Select("jt." + g.joinCol).From(g.table + " jt").
 		Join("tag on tag.id = jt.tag_id").
-		Where(And{Eq{"tag.tag_name": "genre"}, Like{"tag.tag_value": genre}}).ToSql()
+		Where(And{Eq{"tag.tag_name": "genre"}, ILike{"tag.tag_value": genre}}).ToSql()
 	return Expr(g.idCol+" IN ("+sub+")", args...)
 }
 
@@ -121,15 +121,25 @@ func genreFilter(filter genreFilterDef) func(_ string, v any) Sqlizer {
 
 // tagIDFilter matches rows whose tags JSON contains the tag id(s); a "<name>_id" key maps to "$.<name>".
 func tagIDFilter(name string, idValue any) Sqlizer {
-	name = strings.TrimSuffix(name, "_id")
-	return Exists(
-		fmt.Sprintf(`json_tree(tags, "$.%s")`, name),
-		And{
-			NotEq{"json_tree.atom": nil},
-			Eq{"value": idValue},
-		},
-	)
+	return TagFilter("tags", strings.TrimSuffix(name, "_id"), Eq{"id": idValue})
 }
+
+// TagFilter expands a named tag array with typed PostgreSQL record columns.
+// column is an internal SQL identifier; tag names and values are always parameters.
+func TagFilter(column, name string, condition Sqlizer) Sqlizer {
+	if condition == nil {
+		condition = Expr("true")
+	}
+	sql, args, err := condition.ToSql()
+	if err != nil {
+		return errorSqlizer{err}
+	}
+	return Expr("exists (select 1 from jsonb_to_recordset(coalesce("+column+" -> ?, '[]'::jsonb)) as tag_values(id text, value text) where "+sql+")", append([]any{name}, args...)...)
+}
+
+type errorSqlizer struct{ err error }
+
+func (e errorSqlizer) ToSql() (string, []any, error) { return "", nil, e.err }
 
 // tagLibraryIdFilter filters tags based on library access through the library_tag table
 func tagLibraryIdFilter(_ string, value any) Sqlizer {

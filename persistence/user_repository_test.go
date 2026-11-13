@@ -37,6 +37,11 @@ var _ = Describe("UserRepository", func() {
 			NewPassword: "wordpass",
 			IsAdmin:     true,
 		}
+		BeforeEach(func() {
+			usr.Name = "Admin"
+			usr.NewPassword = "wordpass"
+			Expect(repo.Put(ctx, &usr)).To(Succeed())
+		})
 		It("saves the user to the DB", func() {
 			Expect(repo.Put(ctx, &usr)).To(BeNil())
 		})
@@ -86,8 +91,7 @@ var _ = Describe("UserRepository", func() {
 		It("reads back a user row inserted without scrobble_filter", func() {
 			// Guards the column's NOT NULL DEFAULT '': rows predating the migration must stay scannable
 			_, err := GetDBXBuilder().NewQuery(
-				"insert into user (id, user_name, name, email, password, created_at, updated_at) " +
-					"values ('u-rawsql', 'u-rawsql', 'Raw', '', '', datetime('now'), datetime('now'))").Execute()
+				"insert into app_user (id, user_name, name, email, password, created_at, updated_at) values ('u-rawsql', 'u-rawsql', 'Raw', '', '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)").Execute()
 			Expect(err).ToNot(HaveOccurred())
 
 			saved, err := repo.Get(ctx, "u-rawsql")
@@ -757,7 +761,7 @@ var _ = Describe("UserRepository", func() {
 					u := usr
 					u.NewPassword = "concurrent"
 					if err := own.Put(ctx, &u); err != nil {
-						return // the shared in-memory test DB can raise SQLITE_LOCKED
+						return // retry transient serialization failures
 					}
 					epoch, ok := request.TokenEpochFrom(ctx)
 					if !ok {

@@ -526,7 +526,7 @@ var _ = Describe("Items", func() {
 
 		// Search runs a two-phase FTS query whose first phase has no annotation join, so an
 		// annotation predicate there is "no such column: starred" -> 500.
-		DescribeTable("does not push annotation filters into a search",
+		DescribeTable("passes annotation filters into a search",
 			func(itemType, filters string) {
 				ds.Album().(*tests.MockAlbumRepo).SetData(model.Albums{{ID: testID("a1"), Name: "One"}})
 				ds.MediaFile().(*tests.MockMediaFileRepo).SetData(model.MediaFiles{{ID: testID("s1"), Title: "Song"}})
@@ -541,13 +541,14 @@ var _ = Describe("Items", func() {
 				} else {
 					opts = ds.MediaFile().(*tests.MockMediaFileRepo).Options
 				}
-				if opts.Filters == nil {
-					return
-				}
+				Expect(opts.Filters).NotTo(BeNil())
 				sql, _, err := opts.Filters.ToSql()
 				Expect(err).NotTo(HaveOccurred())
-				Expect(sql).NotTo(ContainSubstring("starred"))
-				Expect(sql).NotTo(ContainSubstring("play_count"))
+				if filters == "IsFavorite" {
+					Expect(sql).To(ContainSubstring("starred"))
+				} else {
+					Expect(sql).To(ContainSubstring("play_count"))
+				}
 			},
 			Entry("albums, IsFavorite", "MusicAlbum", "IsFavorite"),
 			Entry("albums, IsUnplayed", "MusicAlbum", "IsUnplayed"),
@@ -1053,7 +1054,7 @@ var _ = Describe("Items", func() {
 				Expect(w.Code).To(Equal(http.StatusOK))
 				_, args, err := mfRepo.Options.Filters.ToSql()
 				Expect(err).NotTo(HaveOccurred())
-				Expect(args).To(ContainElements(testID("ar1"), testID("ar2")))
+				Expect(args).To(ContainElement(Equal([]string{testID("ar1"), testID("ar2")})))
 			})
 
 			It("filters albums by every artist in a comma-separated AlbumArtistIds", func() {
@@ -1066,7 +1067,7 @@ var _ = Describe("Items", func() {
 				Expect(w.Code).To(Equal(http.StatusOK))
 				_, args, err := albumRepo.Options.Filters.ToSql()
 				Expect(err).NotTo(HaveOccurred())
-				Expect(args).To(ContainElements(testID("ar1"), testID("ar2")))
+				Expect(args).To(ContainElement(Equal([]string{testID("ar1"), testID("ar2")})))
 			})
 
 			It("excludes an album artist from a multi-id contributingArtistIds Featured On filter", func() {
@@ -1080,7 +1081,7 @@ var _ = Describe("Items", func() {
 				sql, args, err := albumRepo.Options.Filters.ToSql()
 				Expect(err).NotTo(HaveOccurred())
 				Expect(sql).To(ContainSubstring("NOT IN"))
-				Expect(args).To(ContainElements(testID("ar1"), testID("ar2")))
+				Expect(args).To(ContainElement(Equal([]string{testID("ar1"), testID("ar2")})))
 				Expect(strings.Count(sql, "album_artists")).To(Equal(2))
 			})
 

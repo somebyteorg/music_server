@@ -10,6 +10,7 @@ import (
 	. "github.com/Masterminds/squirrel"
 	"github.com/deluan/rest"
 	"github.com/navidrome/navidrome/consts"
+	"github.com/navidrome/navidrome/db"
 	"github.com/navidrome/navidrome/model"
 	"github.com/navidrome/navidrome/model/id"
 	"github.com/pocketbase/dbx"
@@ -47,8 +48,8 @@ func (r *playerRepository) Put(ctx context.Context, p *model.Player) error {
 func (r *playerRepository) selectPlayer(ctx context.Context, options ...model.QueryOptions) SelectBuilder {
 	return r.newSelect(ctx, options...).
 		Columns("player.*", "player.api_key_hash is not null as has_api_key").
-		Join("user ON player.user_id = user.id").
-		Columns("user.user_name username")
+		Join("app_user ON player.user_id = app_user.id").
+		Columns("app_user.user_name username")
 }
 
 func (r *playerRepository) Get(ctx context.Context, id string) (*model.Player, error) {
@@ -79,7 +80,7 @@ func (r *playerRepository) CountByClient(ctx context.Context, options ...model.Q
 		Columns(
 			"case when client = 'NavidromeUI' then name else client end as player",
 			"count(*) as count",
-		).GroupBy("client")
+		).GroupBy("case when client = 'NavidromeUI' then name else client end")
 	var res []struct {
 		Player string
 		Count  int64
@@ -153,7 +154,7 @@ func (r *playerRepository) Save(ctx context.Context, t *model.Player) (string, e
 	values["id"] = id.NewRandom()
 	values["api_key_hash"] = hashAPIKey(*t.APIKey)
 	_, err = r.executeSQL(ctx, Insert(r.tableName).SetMap(values))
-	if isUniqueViolation(err) {
+	if db.IsUniqueViolation(err) {
 		return "", apiKeyValidationError("ra.validation.unique")
 	}
 	if err != nil {
@@ -169,21 +170,14 @@ func (r *playerRepository) Update(ctx context.Context, id string, entity model.P
 		return r.updateOwned(ctx, id, t, cols...)
 	}
 	// The key and the other columns are two writes; commit both or neither
-	return r.inTx(func(tx *playerRepository) error {
+	return r.withTx(ctx, func(base sqlRepository) error {
+		scoped := *r
+		scoped.sqlRepository = base
+		tx := &scoped
 		if err := tx.SetAPIKey(ctx, id, *t.APIKey); err != nil {
 			return err
 		}
 		return tx.updateOwned(ctx, id, t, cols...)
-	})
-}
-
-func (r *playerRepository) inTx(block func(tx *playerRepository) error) error {
-	conn, ok := r.db.(*dbx.DB)
-	if !ok {
-		return block(r) // already inside a transaction
-	}
-	return conn.Transactional(func(tx *dbx.Tx) error {
-		return block(NewPlayerRepository(tx).(*playerRepository))
 	})
 }
 
@@ -216,14 +210,10 @@ func (r *playerRepository) SetAPIKey(ctx context.Context, playerID, key string) 
 		return err
 	}
 	err := r.updateOwnedRow(ctx, playerID, ownerOnly, map[string]any{"api_key_hash": hashAPIKey(key)})
-	if isUniqueViolation(err) {
+	if db.IsUniqueViolation(err) {
 		return apiKeyValidationError("ra.validation.unique")
 	}
 	return err
-}
-
-func isUniqueViolation(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed")
 }
 
 var _ model.PlayerRepository = (*playerRepository)(nil)

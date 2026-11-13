@@ -85,7 +85,7 @@ func (f *folderEntry) imagesChanged() (changed, artistImage bool) {
 	if len(prevNames) == 0 && len(newNames) == 0 {
 		return false, false
 	}
-	if slices.Equal(prevNames, newNames) && f.prevImagesUpdatedAt.Equal(f.imagesUpdatedAt) {
+	if slices.Equal(prevNames, newNames) && f.prevImagesUpdatedAt.Truncate(time.Microsecond).Equal(f.imagesUpdatedAt.Truncate(time.Microsecond)) {
 		return false, false
 	}
 	return true, slices.ContainsFunc(slices.Concat(prevNames, newNames), artwork.IsArtistImageFile)

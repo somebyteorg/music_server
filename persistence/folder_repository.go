@@ -115,8 +115,7 @@ func (r folderRepository) GetFolderUpdateInfo(ctx context.Context, lib model.Lib
 		}
 	}
 
-	// Process paths in batches to avoid SQLite's expression tree depth limit (max 1000).
-	// Each path generates ~3 conditions, so batch size of 100 keeps us well under the limit.
+	// Bound the number of subtree conditions in each query.
 	const batchSize = 100
 	result := make(map[string]model.FolderUpdateInfo)
 
@@ -161,7 +160,7 @@ func (r folderRepository) getFolderUpdateInfoBatch(ctx context.Context, lib mode
 		// Include all descendants: folders whose path field equals or starts with the target path
 		// Note: Folder.Path is the directory path, so children have path = targetPath
 		pathConditions = append(pathConditions, Eq{"path": cleanPath})
-		pathConditions = append(pathConditions, Like{"path": cleanPath + "/%"})
+		pathConditions = append(pathConditions, ILike{"path": cleanPath + "/%"})
 	}
 
 	// Combine conditions: exact folder IDs OR descendant path patterns
@@ -201,8 +200,7 @@ func (r folderRepository) queryFolderUpdateInfo(ctx context.Context, where And) 
 	return m, nil
 }
 
-// subtreePathChunkSize bounds how many paths one folderSubtreeFilter may expand into: each adds
-// 3 OR terms, and SQLite rejects an expression tree deeper than 1000 (measured: 166 paths).
+// subtreePathChunkSize bounds how many paths one folderSubtreeFilter expands into.
 const subtreePathChunkSize = 100
 
 // folderSubtreeFilter matches the folders at the given library-relative paths and all their
@@ -246,12 +244,6 @@ func (r folderRepository) HasAudioOutsideFolders(ctx context.Context, parent mod
 	})
 }
 
-// escapeLikePrefix escapes SQL LIKE wildcards so a string can be used as a
-// literal prefix in a LIKE pattern (with ESCAPE '\').
-func escapeLikePrefix(s string) string {
-	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
-}
-
 func (r folderRepository) Put(ctx context.Context, f *model.Folder) error {
 	dbf := dbFolder{Folder: f}
 	_, err := r.put(ctx, dbf.ID, &dbf)
@@ -263,7 +255,7 @@ func (r folderRepository) MarkMissing(ctx context.Context, missing bool, ids ...
 	for chunk := range slices.Chunk(ids, 200) {
 		sq := Update(r.tableName).
 			Set("missing", missing).
-			Set("updated_at", time.Now()).
+			Set("updated_at", databaseNow()).
 			Where(Eq{"id": chunk})
 		_, err := r.executeSQL(ctx, sq)
 		if err != nil {
@@ -279,7 +271,7 @@ func (r folderRepository) GetTouchedWithPlaylists(ctx context.Context) (model.Fo
 		Gt{"num_playlists": 0},
 		ConcatExpr("folder.updated_at > library.last_scan_at"),
 	})
-	cursor, err := queryWithStableResults[dbFolder](ctx, r.sqlRepository, query)
+	cursor, err := queryCursor[dbFolder](ctx, r.sqlRepository, query)
 	if err != nil {
 		return nil, err
 	}
@@ -291,7 +283,7 @@ func (r folderRepository) GetAllWithPlaylists(ctx context.Context) (model.Folder
 		Eq{"missing": false},
 		Gt{"num_playlists": 0},
 	})
-	cursor, err := queryWithStableResults[dbFolder](ctx, r.sqlRepository, query)
+	cursor, err := queryCursor[dbFolder](ctx, r.sqlRepository, query)
 	if err != nil {
 		return nil, err
 	}

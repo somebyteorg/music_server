@@ -18,6 +18,7 @@ import (
 
 	"github.com/navidrome/navidrome/conf"
 	"github.com/navidrome/navidrome/conf/configtest"
+	"github.com/navidrome/navidrome/db"
 	"github.com/navidrome/navidrome/model"
 	"github.com/navidrome/navidrome/plugins/host"
 	"github.com/navidrome/navidrome/tests"
@@ -33,6 +34,7 @@ var _ = Describe("TaskQueueService", func() {
 
 	BeforeEach(func() {
 		ctx = GinkgoT().Context()
+		setupPluginStorage(ctx)
 		var err error
 		tmpDir, err = os.MkdirTemp("", "taskqueue-test-*")
 		Expect(err).ToNot(HaveOccurred())
@@ -640,7 +642,7 @@ var _ = Describe("TaskQueueService", func() {
 
 			// Check next_run_at is positive and reasonable (capped at maxRetentionMs from now)
 			var nextRunAt int64
-			err = service.db.QueryRow(`SELECT next_run_at FROM tasks WHERE id = ?`, taskID).Scan(&nextRunAt)
+			err = service.db.QueryRowContext(ctx, `SELECT next_run_at FROM plugin_task WHERE plugin_id = @plugin AND id = ?`, taskID).Scan(&nextRunAt)
 			Expect(err).ToNot(HaveOccurred())
 
 			now := time.Now().UnixMilli()
@@ -759,14 +761,14 @@ var _ = Describe("TaskQueueService", func() {
 
 			service.Close()
 
-			// After close, operations should fail
+			// Closing the service leaves the shared pool available.
 			_, err = service.Enqueue(ctx, "close-test", []byte("data"))
 			Expect(err).To(HaveOccurred())
 		})
 	})
 
 	Describe("Plugin isolation", func() {
-		It("uses separate databases for different plugins", func() {
+		It("isolates queues and tasks for different plugins", func() {
 			manager2 := &Manager{
 				plugins: make(map[string]*plugin),
 			}
@@ -774,12 +776,6 @@ var _ = Describe("TaskQueueService", func() {
 			service2, err := newTaskQueueService(ctx, "other_plugin", manager2, 5)
 			Expect(err).ToNot(HaveOccurred())
 			defer service2.Close()
-
-			// Check that separate database files exist
-			_, err = os.Stat(filepath.Join(tmpDir, "plugins", "test_plugin", "taskqueue.db"))
-			Expect(err).ToNot(HaveOccurred())
-			_, err = os.Stat(filepath.Join(tmpDir, "plugins", "other_plugin", "taskqueue.db"))
-			Expect(err).ToNot(HaveOccurred())
 
 			// Both services should be able to create queues with the same name independently
 			service.invokeCallbackFn = func(_ context.Context, _, _ string, _ []byte, _ int32) (string, error) { return "", nil }
@@ -846,6 +842,9 @@ var _ = Describe("TaskQueueService Integration", Ordered, func() {
 		conf.Server.Plugins.AutoReload = false
 		conf.Server.CacheFolder = conf.NewDir(filepath.Join(tmpDir, "cache"))
 		conf.Server.DataFolder = conf.NewDir(tmpDir)
+
+		_, err = db.Db().ExecContext(GinkgoT().Context(), "INSERT INTO plugin(id,path,manifest,sha256,created_at,updated_at) VALUES ($1,'','{}','',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING", "test-taskqueue")
+		Expect(err).ToNot(HaveOccurred())
 
 		// Setup mock DataStore with pre-enabled plugin
 		mockPluginRepo := tests.CreateMockPluginRepo()

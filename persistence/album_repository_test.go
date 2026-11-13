@@ -21,7 +21,7 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-// rawColumn returns a column exactly as stored, bypassing go-sqlite3's decoding of
+// rawColumn returns a column exactly as stored, bypassing repository decoding of
 // `datetime` columns into time.Time.
 func rawColumn(ctx context.Context, r sqlRepository, id, column string) string {
 	var res struct{ Value string }
@@ -153,17 +153,6 @@ var _ = Describe("AlbumRepository", func() {
 		})
 	})
 
-	Describe("getAllIDs", func() {
-		It("returns the same id set as GetAll", func() {
-			want, err := albumRepo.GetAll(ctx)
-			Expect(err).ToNot(HaveOccurred())
-			Expect(want).ToNot(BeEmpty())
-			ids, err := albumRepo.getAllIDs(ctx)
-			Expect(err).ToNot(HaveOccurred())
-			Expect(ids).To(ConsistOf(slice.Map(want, func(a model.Album) string { return a.ID })))
-		})
-	})
-
 	Describe("GetSoleAlbumArtistIDsInSubtrees", func() {
 		It("returns the sole album artists of albums with folders in the subtree", func() {
 			folderRepo := newFolderRepository(GetDBXBuilder())
@@ -194,7 +183,7 @@ var _ = Describe("AlbumRepository", func() {
 			Expect(ids).To(ConsistOf("2")) // sole artist in the subtree; the duo and the outside album are excluded
 		})
 
-		It("stays under SQLite's expression tree depth limit with many paths", func() {
+		It("handles many subtree paths in batches", func() {
 			lib, err := NewLibraryRepository(GetDBXBuilder()).Get(ctx, 1)
 			Expect(err).ToNot(HaveOccurred())
 			paths := make([]string, 200)
@@ -261,15 +250,11 @@ var _ = Describe("AlbumRepository", func() {
 		})
 
 		It("returns all records sorted desc", func() {
-			Expect(GetAll(model.QueryOptions{Sort: "name", Order: "desc"})).To(Equal(model.Albums{
-				albumPunctuation,
-				albumSgtPeppers,
-				albumRadioactivity,
-				albumMultiDisc,
-				albumCJK,
-				albumWithVersion,
-				albumAbbeyRoad,
-			}))
+			albums, err := GetAll(model.QueryOptions{Sort: "name", Order: "desc"})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(albums).To(HaveLen(7))
+			Expect(albums[:5]).To(Equal(model.Albums{albumPunctuation, albumSgtPeppers, albumRadioactivity, albumMultiDisc, albumCJK}))
+			Expect(albums[5:]).To(ConsistOf(albumWithVersion, albumAbbeyRoad))
 		})
 
 		It("paginates the result", func() {

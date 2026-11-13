@@ -2,8 +2,10 @@ package persistence
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
-	"time"
+	"fmt"
+	"strings"
 
 	. "github.com/Masterminds/squirrel"
 	"github.com/deluan/rest"
@@ -34,15 +36,7 @@ func (r *pluginRepository) ClearErrors(ctx context.Context) error {
 	if !r.isPermitted(ctx) {
 		return rest.ErrPermissionDenied
 	}
-	// An UPDATE takes the write lock even when nothing matches, so only run it when there is an error to clear
-	var hasErrors bool
-	if err := r.db.NewQuery("SELECT EXISTS (SELECT 1 FROM plugin WHERE last_error != '')").Row(&hasErrors); err != nil {
-		return err
-	}
-	if !hasErrors {
-		return nil
-	}
-	_, err := r.db.NewQuery("UPDATE plugin SET last_error = '' WHERE last_error != ''").Execute()
+	_, err := r.executeSQL(ctx, Update(r.tableName).Set("last_error", "").Where(NotEq{"last_error": ""}))
 	return err
 }
 
@@ -86,12 +80,42 @@ func (r *pluginRepository) Put(ctx context.Context, plugin *model.Plugin) error 
 		return rest.ErrPermissionDenied
 	}
 
-	plugin.UpdatedAt = time.Now()
+	plugin.UpdatedAt = databaseNow()
 
 	if plugin.ID == "" {
 		return errors.New("plugin ID cannot be empty")
 	}
 
+	fields := []struct {
+		name  string
+		value *string
+		array bool
+	}{
+		{"manifest", &plugin.Manifest, false}, {"config", &plugin.Config, false},
+		{"users", &plugin.Users, true}, {"libraries", &plugin.Libraries, true},
+	}
+	for _, field := range fields {
+		value := strings.TrimSpace(*field.value)
+		fallback := "{}"
+		if field.array {
+			fallback = "[]"
+		}
+		if value == "" || value == "null" {
+			value = fallback
+		}
+		var parsed any
+		if err := json.Unmarshal([]byte(value), &parsed); err != nil {
+			return fmt.Errorf("plugin %s must contain valid JSON: %w", field.name, err)
+		}
+		if field.array {
+			if _, ok := parsed.([]any); !ok {
+				return fmt.Errorf("plugin %s must be a JSON array", field.name)
+			}
+		} else if _, ok := parsed.(map[string]any); !ok {
+			return fmt.Errorf("plugin %s must be a JSON object", field.name)
+		}
+		*field.value = value
+	}
 	// Upsert using INSERT ... ON CONFLICT for atomic operation
 	_, err := r.db.NewQuery(`
 		INSERT INTO plugin (id, path, manifest, config, users, all_users, libraries, all_libraries, allow_write_access, enabled, last_error, sha256, created_at, updated_at)
@@ -122,9 +146,9 @@ func (r *pluginRepository) Put(ctx context.Context, plugin *model.Plugin) error 
 		"enabled":            plugin.Enabled,
 		"last_error":         plugin.LastError,
 		"sha256":             plugin.SHA256,
-		"created_at":         time.Now(),
+		"created_at":         databaseNow(),
 		"updated_at":         plugin.UpdatedAt,
-	}).Execute()
+	}).WithContext(ctx).Execute()
 	return err
 }
 

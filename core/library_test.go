@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/deluan/rest"
+	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/navidrome/navidrome/adapters/gotaglib" // Register taglib extractor
 	"github.com/navidrome/navidrome/conf/configtest"
 	"github.com/navidrome/navidrome/core"
@@ -137,7 +138,7 @@ var _ = Describe("Library Service", func() {
 
 					// Mock the repository to return a UNIQUE constraint error
 					libraryRepo.PutFn = func(library *model.Library) error {
-						return errors.New("UNIQUE constraint failed: library.name")
+						return &pgconn.PgError{Code: "23505", ConstraintName: "library_name_key"}
 					}
 
 					_, err = repo.Save(ctx, library)
@@ -154,7 +155,7 @@ var _ = Describe("Library Service", func() {
 
 					// Mock the repository to return a UNIQUE constraint error
 					libraryRepo.PutFn = func(library *model.Library) error {
-						return errors.New("UNIQUE constraint failed: library.path")
+						return &pgconn.PgError{Code: "23505", ConstraintName: "library_path_key"}
 					}
 
 					_, err := repo.Save(ctx, library)
@@ -278,7 +279,7 @@ var _ = Describe("Library Service", func() {
 
 					// Mock database constraint violation
 					libraryRepo.PutFn = func(library *model.Library) error {
-						return errors.New("UNIQUE constraint failed: library.name")
+						return &pgconn.PgError{Code: "23505", ConstraintName: "library_name_key"}
 					}
 
 					// Try to update library 2 to have the same name as library 1
@@ -306,7 +307,7 @@ var _ = Describe("Library Service", func() {
 
 					// Mock database constraint violation
 					libraryRepo.PutFn = func(library *model.Library) error {
-						return errors.New("UNIQUE constraint failed: library.path")
+						return &pgconn.PgError{Code: "23505", ConstraintName: "library_path_key"}
 					}
 
 					// Try to update library 2 to have the same path as library 1

@@ -36,7 +36,7 @@ func runDoctor(ctx context.Context) {
 	}
 }
 
-const recoveryAdvice = "Restore a backup (navidrome backup restore), or try SQLite's '.recover' command."
+const recoveryAdvice = "Restore a backup (navidrome backup restore), or inspect PostgreSQL with its native diagnostic tools."
 
 func printFindings(out io.Writer, check, noun string, items []string) {
 	fmt.Fprintf(out, "%s reported %d %s:\n", check, len(items), noun)
@@ -48,7 +48,7 @@ func printFindings(out io.Writer, check, noun string, items []string) {
 func doctor(ctx context.Context, database *sql.DB, out io.Writer) bool {
 	healthy := true
 
-	fmt.Fprintln(out, "Checking database integrity...")
+	fmt.Fprintln(out, "Checking PostgreSQL index validity...")
 	issues, truncated, err := db.IntegrityCheck(ctx, database)
 	switch {
 	case err != nil:
@@ -56,7 +56,7 @@ func doctor(ctx context.Context, database *sql.DB, out io.Writer) bool {
 		fmt.Fprintln(out, recoveryAdvice)
 		return false
 	case len(issues) == 0:
-		fmt.Fprintln(out, "Integrity check passed.")
+		fmt.Fprintln(out, "Index validity check passed.")
 	default:
 		healthy = false
 		printFindings(out, "Integrity check", "issue(s)", issues)
@@ -93,7 +93,7 @@ func doctor(ctx context.Context, database *sql.DB, out io.Writer) bool {
 	}
 
 	if healthy {
-		fmt.Fprintln(out, "Database is healthy.")
+		fmt.Fprintln(out, "PostgreSQL catalog and foreign key checks passed.")
 	}
 	return healthy
 }

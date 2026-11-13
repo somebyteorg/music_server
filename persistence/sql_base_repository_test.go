@@ -60,7 +60,7 @@ var _ = Describe("sqlRepository", func() {
 				Offset: 2,
 			})
 			sql, _, _ := sq.ToSql()
-			Expect(sql).To(Equal("SELECT * FROM test ORDER BY title desc LIMIT 1 OFFSET 2"))
+			Expect(sql).To(Equal("SELECT * FROM test ORDER BY title desc, table.id LIMIT 1 OFFSET 2"))
 		})
 
 		It("applies a per-key SortOrder after mappings expand", func() {
@@ -72,7 +72,7 @@ var _ = Describe("sqlRepository", func() {
 			})
 			sql, _, _ := sq.ToSql()
 			Expect(sql).To(Equal("SELECT * FROM test ORDER BY duration desc, title asc, " +
-				"coalesce(nullif(original_date,''), cast(max_year as text)) desc, release_date desc, play_count desc"))
+				"coalesce(nullif(original_date,''), cast(max_year as text)) desc, release_date desc, play_count desc, table.id"))
 		})
 	})
 
@@ -319,7 +319,7 @@ var _ = Describe("sqlRepository", func() {
 			// Add library 2 so a user granted only library 1 is a genuine strict subset.
 			savedDB = r.db
 			r.db = GetDBXBuilder()
-			_, err := r.db.NewQuery("INSERT OR IGNORE INTO library (id, name, path) VALUES (2, 'Lib 2', '/lib2')").Execute()
+			_, err := r.db.NewQuery("INSERT INTO library (id, name, path) VALUES (2, 'Lib 2', '/lib2') ON CONFLICT DO NOTHING").Execute()
 			Expect(err).ToNot(HaveOccurred())
 		})
 
@@ -397,18 +397,18 @@ var _ = Describe("sqlRepository", func() {
 				})
 			})
 
-			It("should not apply the library filter (subquery would filter nothing)", func() {
+			It("checks current library grants even when cached grants include every library", func() {
 				result := r.applyLibraryFilter(ctx, sq)
 				sql, _, err := result.ToSql()
 				Expect(err).ToNot(HaveOccurred())
-				Expect(sql).To(Equal("SELECT * FROM test_table"))
+				Expect(sql).To(ContainSubstring("table.library_id IN (SELECT ul.library_id FROM user_library ul WHERE ul.user_id = ?)"))
 			})
 
-			It("should not apply the filter even with a custom table name", func() {
+			It("checks current library grants with a custom table name", func() {
 				result := r.applyLibraryFilter(ctx, sq, "custom_table")
 				sql, _, err := result.ToSql()
 				Expect(err).ToNot(HaveOccurred())
-				Expect(sql).To(Equal("SELECT * FROM test_table"))
+				Expect(sql).To(ContainSubstring("custom_table.library_id IN (SELECT ul.library_id FROM user_library ul WHERE ul.user_id = ?)"))
 			})
 		})
 

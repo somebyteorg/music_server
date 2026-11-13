@@ -27,6 +27,7 @@ var redacted = &Hook{
 	AcceptedLevels: logrus.AllLevels,
 	RedactionList: []string{
 		// Keys from the config
+		`(DatabaseURL:[\s]*")(?:[^"\\]|\\.)*`,
 		"(ApiKey:[\\s]*\")[\\w]*",
 		"(Secret:[\\s]*\")[\\w]*",
 		"(PasswordEncryptionKey:[\\s]*\")[^\"]*",

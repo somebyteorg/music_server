@@ -5,178 +5,147 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
 	"time"
 
-	"github.com/mattn/go-sqlite3"
+	"github.com/jackc/pgx/v5"
 	"github.com/navidrome/navidrome/conf"
 	"github.com/navidrome/navidrome/log"
 )
 
 const (
-	backupPrefix      = "navidrome_backup"
-	backupRegexString = "^" + backupPrefix + "_(.+)\\.db$"
+	backupPrefix       = "navidrome_backup"
+	backupRegexString  = "^" + backupPrefix + "_(.+)\\.dump$"
+	backupSuffixLayout = "2006.01.02_15.04.05.000000000"
 )
 
 var backupRegex = regexp.MustCompile(backupRegexString)
 
-const backupSuffixLayout = "2006.01.02_15.04.05"
-
-func backupPath(t time.Time) string {
-	return filepath.Join(
-		conf.Server.Backup.Path.MustPath(),
-		fmt.Sprintf("%s_%s.db", backupPrefix, t.Format(backupSuffixLayout)),
-	)
+func backupPath(now time.Time) string {
+	return filepath.Join(conf.Server.Backup.Path.String(), fmt.Sprintf("%s_%s.dump", backupPrefix, now.Format(backupSuffixLayout)))
 }
 
-func openBackupFile(path string) (*sql.DB, error) {
-	Db() // Registers Driver, which the CLI commands haven't done at this point.
-	backupDb, err := sql.Open(Driver, path)
+// postgresCommand keeps the connection password out of command-line arguments.
+func postgresCommand(ctx context.Context, name string, args ...string) (*exec.Cmd, error) {
+	cfg, err := pgx.ParseConfig(conf.Server.DatabaseURL)
 	if err != nil {
-		return nil, fmt.Errorf("opening backup database in '%s': %w", path, err)
+		return nil, fmt.Errorf("invalid database configuration")
 	}
-	return backupDb, nil
+	connection, err := url.Parse(conf.Server.DatabaseURL)
+	if err != nil || (connection.Scheme != "postgres" && connection.Scheme != "postgresql") {
+		return nil, fmt.Errorf("DatabaseURL must be a PostgreSQL URL for backup commands")
+	}
+	connection.User = url.User(cfg.User)
+	query := connection.Query()
+	query.Del("password")
+	connection.RawQuery = query.Encode()
+	command := exec.CommandContext(ctx, name, append([]string{"--dbname=" + connection.String()}, args...)...)
+	command.Env = append(os.Environ(), "PGPASSWORD="+cfg.Password)
+	return command, nil
 }
 
-func copyDatabase(ctx context.Context, dest, source *sql.DB) error {
-	// heavily inspired by https://codingrabbits.dev/posts/go_and_sqlite_backup_and_maybe_restore/
-	destConn, err := dest.Conn(ctx)
+func Backup(ctx context.Context) (string, error) {
+	directory, err := conf.Server.Backup.Path.Path()
 	if err != nil {
-		return fmt.Errorf("getting destination connection: %w", err)
+		return "", err
 	}
-	defer destConn.Close()
-
-	sourceConn, err := source.Conn(ctx)
+	if directory == "" {
+		directory = "."
+	}
+	path := backupPath(time.Now())
+	command, err := postgresCommand(ctx, "pg_dump", "--format=custom", "--no-owner", "--no-privileges",
+		"--strict-names", "--schema="+conf.Server.DatabaseSchema)
 	if err != nil {
-		return fmt.Errorf("getting source connection: %w", err)
+		return "", err
 	}
-	defer sourceConn.Close()
-
-	return destConn.Raw(func(rawDest any) error {
-		return sourceConn.Raw(func(rawSource any) error {
-			sqliteDest, destOk := rawDest.(*sqlite3.SQLiteConn)
-			if !destOk {
-				return fmt.Errorf("error trying to convert destination to sqlite connection")
-			}
-			sqliteSource, sourceOk := rawSource.(*sqlite3.SQLiteConn)
-			if !sourceOk {
-				return fmt.Errorf("error trying to convert source to sqlite connection")
-			}
-
-			backupOp, err := sqliteDest.Backup("main", sqliteSource, "main")
-			if err != nil {
-				return fmt.Errorf("error starting sqlite backup: %w", err)
-			}
-			defer backupOp.Close()
-
-			// Caution: -1 means that sqlite will hold a read lock until the operation finishes
-			// This will lock out other writes that could happen at the same time
-			done, err := backupOp.Step(-1)
-			if err != nil {
-				return fmt.Errorf("error during backup step: %w", err)
-			}
-			if !done {
-				return fmt.Errorf("backup not done with step -1")
-			}
-
-			err = backupOp.Finish()
-			if err != nil {
-				return fmt.Errorf("error finishing backup: %w", err)
-			}
-
-			return nil
-		})
-	})
+	output, err := os.CreateTemp(directory, ".navidrome-backup-*.partial")
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = os.Remove(output.Name()) }()
+	command.Stdout = output
+	var stderr strings.Builder
+	command.Stderr = &stderr
+	runErr := command.Run()
+	var syncErr error
+	if runErr == nil {
+		syncErr = output.Sync()
+	}
+	closeErr := output.Close()
+	if err := errors.Join(runErr, syncErr, closeErr); err != nil {
+		return "", fmt.Errorf("pg_dump failed: %w: %s", err, stderr.String())
+	}
+	// Publish only complete archives so pruning cannot see an in-progress dump.
+	if err := os.Rename(output.Name(), path); err != nil {
+		return "", fmt.Errorf("publishing database backup: %w", err)
+	}
+	return path, nil
 }
 
-// checkRestoreSource runs sanity checks on a file about to be restored over the live
-// database. They catch the common ways a backup goes bad, not every kind of damage.
-func checkRestoreSource(ctx context.Context, backupDb *sql.DB, path string, integrityCheck bool) error {
-	// SQLite opens an empty file as an empty database, and restoring it would wipe the live one.
-	// user and media_file exist since the first migration, so backups of any age have them.
-	var tables int
-	err := backupDb.QueryRowContext(ctx,
-		"SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name IN ('goose_db_version', 'user', 'media_file')").Scan(&tables)
+func Restore(ctx context.Context, path string, integrityCheck bool) error {
+	file, err := os.Open(path)
 	if err != nil {
-		return fmt.Errorf("reading backup file '%s': %w", path, err)
+		return err
 	}
-	if tables != 3 {
-		return fmt.Errorf("backup file '%s' is not a Navidrome database", path)
+	var header [5]byte
+	_, err = io.ReadFull(file, header[:])
+	_ = file.Close()
+	if err != nil || string(header[:]) != "PGDMP" {
+		return fmt.Errorf("backup is not a PostgreSQL custom archive")
 	}
-
-	// The table can be there with nothing in it, or with only the row goose adds when it creates it.
-	var applied int
-	err = backupDb.QueryRowContext(ctx,
-		"SELECT count(*) FROM goose_db_version WHERE is_applied = 1 AND version_id > 0").Scan(&applied)
+	listing, err := exec.CommandContext(ctx, "pg_restore", "--list", path).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("reading backup file '%s': %w", path, err)
+		return fmt.Errorf("reading backup archive: %w: %s", err, listing)
 	}
-	if applied == 0 {
-		return fmt.Errorf("backup file '%s' has no applied migrations", path)
+	for _, table := range []string{"goose_db_version", "media_file", "app_user"} {
+		expected := " TABLE " + conf.Server.DatabaseSchema + " " + table + " "
+		if !strings.Contains(string(listing), expected) {
+			return fmt.Errorf("backup does not contain %s in schema %s", table, conf.Server.DatabaseSchema)
+		}
 	}
-
-	// The queries above only read the first pages. Both checks walk the whole file, and
-	// integrity_check also compares indexes to their tables, which is much slower.
-	check := "PRAGMA quick_check(1)"
 	if integrityCheck {
-		check = "PRAGMA integrity_check(1)"
+		command := exec.CommandContext(ctx, "pg_restore", "--file=-", path)
+		command.Stdout = io.Discard
+		var stderr strings.Builder
+		command.Stderr = &stderr
+		if err := command.Run(); err != nil {
+			return fmt.Errorf("reading full backup archive: %w: %s", err, stderr.String())
+		}
 	}
-	var result string
-	if err := backupDb.QueryRowContext(ctx, check).Scan(&result); err != nil {
-		return fmt.Errorf("checking backup file '%s': %w", path, err)
+	// Schema-filtered restores do not recreate the namespace itself, and dumps
+	// exclude extensions in public. Prepare both before restoring into an empty DB.
+	if err := WithTransaction(ctx, Db(), func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, "CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public"); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, "CREATE SCHEMA IF NOT EXISTS "+pgx.Identifier{conf.Server.DatabaseSchema}.Sanitize())
+		return err
+	}); err != nil {
+		return fmt.Errorf("preparing PostgreSQL backup dependencies: %w", err)
 	}
-	if result != "ok" {
-		return fmt.Errorf("backup file '%s' is damaged: %s", path, result)
+	command, err := postgresCommand(ctx, "pg_restore", "--clean", "--if-exists", "--single-transaction", "--exit-on-error",
+		"--no-owner", "--no-privileges", "--strict-names", "--schema="+conf.Server.DatabaseSchema, path)
+	if err != nil {
+		return err
+	}
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("pg_restore failed: %w: %s", err, output)
 	}
 	return nil
 }
 
-func Backup(ctx context.Context) (string, error) {
-	destPath := backupPath(time.Now())
-	log.Debug(ctx, "Creating backup", "path", destPath)
-	backupDb, err := openBackupFile(destPath)
-	if err != nil {
-		return "", err
-	}
-	defer backupDb.Close()
-
-	if err := copyDatabase(ctx, backupDb, Db()); err != nil {
-		return "", err
-	}
-
-	return destPath, nil
-}
-
-func Restore(ctx context.Context, path string, integrityCheck bool) error {
-	log.Debug(ctx, "Restoring backup", "path", path)
-
-	// The driver splits the DSN at '?', so such a path would open a different file.
-	if strings.ContainsRune(path, '?') {
-		return fmt.Errorf("backup path cannot contain '?': %s", path)
-	}
-	// The driver opens with SQLITE_OPEN_CREATE, so without this check a typo in the
-	// path would create an empty database and "restore" it over the live one.
-	if _, err := os.Stat(path); err != nil {
-		return fmt.Errorf("backup file not available: %w", err)
-	}
-
-	backupDb, err := openBackupFile(path)
-	if err != nil {
-		return err
-	}
-	defer backupDb.Close()
-
-	if err := checkRestoreSource(ctx, backupDb, path, integrityCheck); err != nil {
-		return err
-	}
-	return copyDatabase(ctx, Db(), backupDb)
-}
-
 func Prune(ctx context.Context) (int, error) {
+	if conf.Server.Backup.Count < 0 {
+		return 0, fmt.Errorf("backup count cannot be negative")
+	}
 	backupDir, err := conf.Server.Backup.Path.Path()
 	if err != nil {
 		return 0, fmt.Errorf("backup directory not available: %w", err)
@@ -186,34 +155,44 @@ func Prune(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("unable to read database backup entries: %w", err)
 	}
 
-	var backupTimes []time.Time
+	type archive struct {
+		name string
+		time time.Time
+	}
+	var backups []archive
 
 	for _, file := range files {
 		if !file.IsDir() {
 			submatch := backupRegex.FindStringSubmatch(file.Name())
 			if len(submatch) == 2 {
 				timestamp, err := time.Parse(backupSuffixLayout, submatch[1])
+				if err != nil {
+					timestamp, err = time.Parse("2006.01.02_15.04.05", submatch[1])
+				}
 				if err == nil {
-					backupTimes = append(backupTimes, timestamp)
+					backups = append(backups, archive{name: file.Name(), time: timestamp})
 				}
 			}
 		}
 	}
 
-	if len(backupTimes) <= conf.Server.Backup.Count {
+	if len(backups) <= conf.Server.Backup.Count {
 		return 0, nil
 	}
 
-	slices.SortFunc(backupTimes, func(a, b time.Time) int {
-		return b.Compare(a)
+	slices.SortFunc(backups, func(a, b archive) int {
+		return b.time.Compare(a.time)
 	})
 
 	pruneCount := 0
 	var errs []error
 
-	for _, timeToPrune := range backupTimes[conf.Server.Backup.Count:] {
-		log.Debug(ctx, "Pruning backup", "time", timeToPrune)
-		path := backupPath(timeToPrune)
+	for _, backup := range backups[conf.Server.Backup.Count:] {
+		if err := ctx.Err(); err != nil {
+			return pruneCount, errors.Join(append(errs, err)...)
+		}
+		log.Debug(ctx, "Pruning backup", "time", backup.time)
+		path := filepath.Join(backupDir, backup.name)
 		err = os.Remove(path)
 		if err != nil {
 			errs = append(errs, err)

@@ -2,13 +2,14 @@ package persistence
 
 import (
 	"context"
-	"errors"
+	"sort"
 	"strings"
 	"time"
 
 	. "github.com/Masterminds/squirrel"
 	"github.com/navidrome/navidrome/log"
 	"github.com/navidrome/navidrome/model"
+	"github.com/navidrome/navidrome/model/id"
 	"github.com/navidrome/navidrome/utils/slice"
 	"github.com/pocketbase/dbx"
 )
@@ -36,42 +37,41 @@ type playQueue struct {
 }
 
 func (r *playQueueRepository) Store(ctx context.Context, q *model.PlayQueue, colNames ...string) error {
-	u := loggedUser(ctx)
-
-	// Always find existing playqueue for this user
-	existingQueue, err := r.Retrieve(ctx, q.UserID)
-	if err != nil && !errors.Is(err, model.ErrNotFound) {
-		log.Error(ctx, "Error retrieving existing playqueue", "user", u.UserName, err)
-		return err
-	}
-
-	// Use existing ID if found, otherwise keep the provided ID (which may be empty for new records)
-	if !errors.Is(err, model.ErrNotFound) && existingQueue.ID != "" {
-		q.ID = existingQueue.ID
-	}
-
-	// When no specific columns are provided, we replace the whole queue
-	if len(colNames) == 0 {
-		err := r.clearPlayQueue(ctx, q.UserID)
-		if err != nil {
-			log.Error(ctx, "Error deleting previous playqueue", "user", u.UserName, err)
-			return err
-		}
-		if len(q.Items) == 0 {
-			return nil
-		}
+	if len(colNames) == 0 && len(q.Items) == 0 {
+		return r.clearPlayQueue(ctx, q.UserID)
 	}
 
 	pq := r.fromModel(q)
 	if pq.ID == "" {
-		pq.CreatedAt = time.Now()
+		pq.ID = id.NewRandom()
 	}
-	pq.UpdatedAt = time.Now()
-	_, err = r.put(ctx, pq.ID, pq, colNames...)
+	pq.UpdatedAt = databaseNow()
+	if pq.CreatedAt.IsZero() {
+		pq.CreatedAt = pq.UpdatedAt
+	}
+	values, err := toSQLArgs(pq)
 	if err != nil {
-		log.Error(ctx, "Error saving playqueue", "user", u.UserName, err)
 		return err
 	}
+	updates := selectUpdateColumns(values, colNames...)
+	delete(updates, "id")
+	delete(updates, "user_id")
+	updates["updated_at"] = pq.UpdatedAt
+	updates["changed_by"] = pq.ChangedBy
+	assignments := make([]string, 0, len(updates))
+	for column := range updates {
+		assignments = append(assignments, column+" = EXCLUDED."+column)
+	}
+	sort.Strings(assignments)
+	// The user key serializes concurrent saves without deleting the previous queue.
+	query := Insert(r.tableName).SetMap(values).Suffix(
+		"ON CONFLICT (user_id) DO UPDATE SET " + strings.Join(assignments, ", ") +
+			" RETURNING id, created_at, updated_at")
+	var saved playQueue
+	if err := r.queryOne(ctx, query, &saved); err != nil {
+		return err
+	}
+	q.ID, q.CreatedAt, q.UpdatedAt = saved.ID, saved.CreatedAt, saved.UpdatedAt
 	return nil
 }
 
@@ -79,8 +79,11 @@ func (r *playQueueRepository) RetrieveWithMediaFiles(ctx context.Context, userId
 	sel := r.newSelect(ctx).Columns("*").Where(Eq{"user_id": userId})
 	var res playQueue
 	err := r.queryOne(ctx, sel, &res)
+	if err != nil {
+		return nil, err
+	}
 	q := r.toModel(&res)
-	q.Items = r.loadTracks(ctx, q.Items)
+	q.Items, err = r.loadTracks(ctx, q.Items)
 	return &q, err
 }
 
@@ -130,9 +133,9 @@ func (r *playQueueRepository) toModel(pq *playQueue) model.PlayQueue {
 
 // loadTracks loads the tracks from the database. It receives a list of track IDs and returns a list of MediaFiles
 // in the same order as the input list.
-func (r *playQueueRepository) loadTracks(ctx context.Context, tracks model.MediaFiles) model.MediaFiles {
+func (r *playQueueRepository) loadTracks(ctx context.Context, tracks model.MediaFiles) (model.MediaFiles, error) {
 	if len(tracks) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	mfRepo := NewMediaFileRepository(r.db)
@@ -141,13 +144,14 @@ func (r *playQueueRepository) loadTracks(ctx context.Context, tracks model.Media
 	// Create an iterator to collect all track IDs
 	ids := slice.SeqFunc(tracks, func(t model.MediaFile) string { return t.ID })
 
-	// Break the list in chunks, up to 500 items, to avoid hitting SQLITE_MAX_VARIABLE_NUMBER limit
+	// Bound query size and artwork hydration for large queues.
 	for chunk := range slice.CollectChunks(ids, 500) {
 		idsFilter := Eq{"media_file.id": chunk}
 		tracks, err := mfRepo.GetAll(ctx, model.QueryOptions{Filters: idsFilter})
 		if err != nil {
 			u := loggedUser(ctx)
 			log.Error(ctx, "Could not load playqueue/bookmark's tracks", "user", u.UserName, err)
+			return nil, err
 		}
 		for _, t := range tracks {
 			trackMap[t.ID] = t
@@ -162,7 +166,7 @@ func (r *playQueueRepository) loadTracks(ctx context.Context, tracks model.Media
 			newTracks = append(newTracks, track)
 		}
 	}
-	return newTracks
+	return newTracks, nil
 }
 
 func (r *playQueueRepository) clearPlayQueue(ctx context.Context, userId string) error {

@@ -16,8 +16,7 @@ import (
 
 var analyzeMux sync.Mutex
 
-// Optimize refreshes the query-planner statistics with a full ANALYZE. PRAGMA optimize is avoided
-// because its limited analysis misestimates Navidrome's low-cardinality indexes.
+// Optimize refreshes PostgreSQL planner statistics after bulk library changes.
 func Optimize(ctx context.Context) error {
 	analyzeMux.Lock()
 	defer analyzeMux.Unlock()
@@ -144,19 +143,7 @@ func optimizeAt(ctx context.Context, db *sql.DB, now time.Time) error {
 	return nil
 }
 
-// One ANALYZE per index (whole table if WITHOUT ROWID or lacking a non-partial index) yields the
-// same sqlite_stat1 rows as a full ANALYZE, but frees the write lock between steps.
-const analyzeTargetsSQL = `
-SELECT i.name FROM sqlite_schema i JOIN pragma_table_list t ON t.schema = 'main' AND t.name = i.tbl_name
-WHERE i.type = 'index' AND t.wr = 0 AND EXISTS (SELECT 1 FROM pragma_index_list(t.name) l WHERE l.partial = 0)
-UNION ALL
-SELECT t.name FROM pragma_table_list t
-WHERE t.schema = 'main' AND t.type IN ('table', 'shadow') AND t.name NOT LIKE 'sqlite_%'
-  AND (t.wr = 1 OR NOT EXISTS (SELECT 1 FROM pragma_index_list(t.name) l WHERE l.partial = 0))`
-
-// analyzeMaxYield is just above SQLite's longest busy-handler sleep, so every waiting writer
-// retries during the pause.
-const analyzeMaxYield = 150 * time.Millisecond
+const analyzeTargetsSQL = `SELECT tablename FROM pg_tables WHERE schemaname = current_schema() ORDER BY tablename`
 
 func analyzeInSteps(ctx context.Context, db *sql.DB) error {
 	targets, err := analyzeTargets(ctx, db)
@@ -164,14 +151,8 @@ func analyzeInSteps(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	for _, target := range targets {
-		start := time.Now()
 		if _, err := db.ExecContext(ctx, `ANALYZE "`+strings.ReplaceAll(target, `"`, `""`)+`"`); err != nil {
 			return fmt.Errorf("analyzing %s: %w", target, err)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(min(time.Since(start), analyzeMaxYield)):
 		}
 	}
 	return nil
@@ -194,25 +175,18 @@ func analyzeTargets(ctx context.Context, db *sql.DB) ([]string, error) {
 	return targets, rows.Err()
 }
 
-func recordAnalyzeSuccess(ctx context.Context, db *sql.DB, now time.Time) error {
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("recording ANALYZE time: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	if err = putProperty(ctx, tx, consts.LastDBAnalyzeAtKey, now.UTC().Format(time.RFC3339Nano)); err != nil {
-		return fmt.Errorf("recording ANALYZE time: %w", err)
-	}
-	if err = putProperty(ctx, tx, consts.DBAnalyzePendingKey, "0"); err != nil {
-		return fmt.Errorf("clearing pending ANALYZE: %w", err)
-	}
-	if err = putProperty(ctx, tx, consts.DBAnalyzeFailureCountKey, "0"); err != nil {
-		return fmt.Errorf("clearing ANALYZE failure count: %w", err)
-	}
-	if err = tx.Commit(); err != nil {
-		return fmt.Errorf("recording ANALYZE state: %w", err)
-	}
-	return nil
+func recordAnalyzeSuccess(ctx context.Context, pool *sql.DB, now time.Time) error {
+	return WithTransaction(ctx, pool, func(tx *sql.Tx) error {
+		for _, entry := range []struct{ key, value string }{
+			{consts.LastDBAnalyzeAtKey, now.UTC().Format(time.RFC3339Nano)},
+			{consts.DBAnalyzePendingKey, "0"}, {consts.DBAnalyzeFailureCountKey, "0"},
+		} {
+			if err := putProperty(ctx, tx, entry.key, entry.value); err != nil {
+				return fmt.Errorf("recording ANALYZE state: %w", err)
+			}
+		}
+		return nil
+	})
 }
 
 func recordAnalyzeError(ctx context.Context, db *sql.DB, now time.Time, analyzeErr error) error {
@@ -222,32 +196,17 @@ func recordAnalyzeError(ctx context.Context, db *sql.DB, now time.Time, analyzeE
 	return analyzeErr
 }
 
-func recordAnalyzeFailure(ctx context.Context, db *sql.DB, now time.Time) error {
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	value, found, err := getProperty(ctx, tx, consts.DBAnalyzeFailureCountKey)
-	if err != nil {
-		return err
-	}
-	failures := 0
-	if found {
-		failures, _ = strconv.Atoi(value)
-		failures = max(failures, 0)
-	}
-	if err = putProperty(ctx, tx, consts.DBAnalyzePendingKey, "1"); err != nil {
-		return err
-	}
-	if err = putProperty(ctx, tx, consts.DBAnalyzeFailureCountKey, strconv.Itoa(failures+1)); err != nil {
-		return err
-	}
-	if err = putProperty(ctx, tx, consts.LastDBAnalyzeAttemptAtKey, now.UTC().Format(time.RFC3339Nano)); err != nil {
-		return err
-	}
-	return tx.Commit()
+func recordAnalyzeFailure(ctx context.Context, pool *sql.DB, now time.Time) error {
+	return WithTransaction(ctx, pool, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO property(id,value) VALUES($1,'1')
+            ON CONFLICT(id) DO UPDATE SET value=(greatest(property.value::integer,0)+1)::text`, consts.DBAnalyzeFailureCountKey); err != nil {
+			return err
+		}
+		if err := putProperty(ctx, tx, consts.DBAnalyzePendingKey, "1"); err != nil {
+			return err
+		}
+		return putProperty(ctx, tx, consts.LastDBAnalyzeAttemptAtKey, now.UTC().Format(time.RFC3339Nano))
+	})
 }
 
 type sqlExecer interface {
@@ -259,14 +218,14 @@ type sqlQueryer interface {
 }
 
 func putProperty(ctx context.Context, db sqlExecer, key, value string) error {
-	_, err := db.ExecContext(ctx, `insert into property(id, value) values(?, ?)
+	_, err := db.ExecContext(ctx, `insert into property(id, value) values($1, $2)
 		on conflict(id) do update set value=excluded.value`, key, value)
 	return err
 }
 
 func getProperty(ctx context.Context, db sqlQueryer, key string) (string, bool, error) {
 	var value string
-	err := db.QueryRowContext(ctx, "select value from property where id=?", key).Scan(&value)
+	err := db.QueryRowContext(ctx, "select value from property where id=$1", key).Scan(&value)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
 	}

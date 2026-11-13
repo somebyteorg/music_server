@@ -118,7 +118,7 @@ func runPrune(ctx context.Context) {
 }
 
 func runRestore(ctx context.Context) {
-	requireExistingDB()
+	defer db.Close(ctx)
 
 	// A relative --backup-file is resolved against Backup.Path, the same folder
 	// `backup create` writes to. Without this, the value was treated as relative

@@ -13,8 +13,22 @@ import (
 	"github.com/navidrome/navidrome/db"
 )
 
+func databaseNow() time.Time { return time.Now().UTC().Truncate(time.Microsecond) }
+
 type PostMapper interface {
 	PostMapArgs(map[string]any) error
+}
+
+// escapeLikePrefix preserves literal backslashes, percent signs and underscores
+// in PostgreSQL LIKE/ILIKE patterns before the caller adds its own wildcards.
+func escapeLikePrefix(value string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(value)
+}
+
+// stringIDsFilter keeps unbounded id collections in one PostgreSQL array bind.
+// column is an internal identifier, never request input.
+func stringIDsFilter(column string, ids []string) squirrel.Sqlizer {
+	return squirrel.Expr(column+" = ANY(CAST(? AS text[]))", ids)
 }
 
 func toSQLArgs(rec any) (map[string]any, error) {
@@ -90,22 +104,23 @@ func naturalSort(col string) string {
 	if !conf.Server.EnableNaturalSorting {
 		return col
 	}
-	return fmt.Sprintf("(%s collate %s)", col, db.NaturalCollation)
+	return fmt.Sprintf("(lower(%s) collate %s)", col, db.NaturalCollation)
 }
 
 // Convert the order_* columns to a collated sort expression, falling back to the
 // sort_* column when those are preferred. Example:
-// order_album_name -> (coalesce(nullif(sort_album_name,”),order_album_name) collate nocase)
+// order_album_name -> lower(coalesce(nullif(sort_album_name,”),order_album_name))
 // It finds order column names anywhere in the substring
 func mapSortOrder(tableName, order string) string {
 	col := tableName + ".order_$1"
 	if conf.Server.PreferSortTags {
 		col = fmt.Sprintf("coalesce(nullif(%[1]s.sort_$1,''),%[1]s.order_$1)", tableName)
 	}
-	collation := "nocase"
+	col = "lower(" + col + ")"
+	collation := ""
 	if conf.Server.EnableNaturalSorting {
-		collation = db.NaturalCollation
+		collation = " collate " + db.NaturalCollation
 	}
-	repl := fmt.Sprintf("(%s collate %s)", col, collation)
+	repl := fmt.Sprintf("(%s%s)", col, collation)
 	return sortOrderRegex.ReplaceAllString(strings.ToLower(order), repl)
 }

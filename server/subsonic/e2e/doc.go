@@ -1,20 +1,20 @@
 // Package e2e provides end-to-end integration tests for the Navidrome Subsonic API.
 //
 // These tests exercise the full HTTP request/response cycle through the Subsonic API router,
-// using a real SQLite database and real repository implementations while stubbing out external
+// using a real PostgreSQL schema and real repository implementations while stubbing out external
 // services (artwork, streaming, scrobbling, etc.) with noop implementations.
 //
 // # Test Infrastructure
 //
 // The suite uses [Ginkgo] v2 as the test runner and [Gomega] for assertions. It is invoked
 // through the standard Go test entry point [TestSubsonicE2E], which initializes the test
-// environment, creates a temporary SQLite database, and runs the specs.
+// environment, creates a temporary PostgreSQL schema, and runs the specs.
 //
 // # Setup and Teardown
 //
 // During [BeforeSuite], the test infrastructure:
 //
-//  1. Creates a temporary SQLite database with WAL journal mode.
+//  1. Creates a temporary PostgreSQL schema with isolated test fixtures.
 //  2. Initializes the schema via [db.Init].
 //  3. Creates two test users: an admin ("admin") and a regular user ("regular"),
 //     both with the password "password".
@@ -44,7 +44,7 @@
 // # Database Isolation
 //
 // Before each top-level Describe block, the [setupTestDB] function restores the database
-// to its golden snapshot state using SQLite's ATTACH DATABASE mechanism. This copies all
+// to its golden snapshot state using a PostgreSQL fixture schema. This copies all
 // table data from the snapshot back into the main database, providing each test group with
 // a clean, consistent starting state without the overhead of re-scanning the filesystem.
 //

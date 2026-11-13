@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"time"
 
 	. "github.com/Masterminds/squirrel"
 	"github.com/deluan/rest"
@@ -56,7 +55,7 @@ var (
 func NewUserRepository(db dbx.Builder) model.UserRepository {
 	r := &userRepository{}
 	r.db = db
-	r.tableName = "user"
+	r.tableName = "app_user"
 	r.registerModel(&model.User{}, map[string]filterFunc{
 		"id":       idFilter(r.tableName),
 		"password": invalidFilter,
@@ -71,8 +70,8 @@ func NewUserRepository(db dbx.Builder) model.UserRepository {
 // selectUserWithLibraries returns a SelectBuilder that includes library information
 func (r *userRepository) selectUserWithLibraries(ctx context.Context, options ...model.QueryOptions) SelectBuilder {
 	return r.newSelect(ctx, options...).
-		Columns(`user.*`,
-			`COALESCE(json_group_array(json_object(
+		Columns(`app_user.*`,
+			`COALESCE(jsonb_agg(jsonb_build_object(
 				'id', library.id,
 				'name', library.name,
 				'path', library.path,
@@ -83,9 +82,9 @@ func (r *userRepository) selectUserWithLibraries(ctx context.Context, options ..
 				'updated_at', library.updated_at,
 				'created_at', library.created_at
 			)) FILTER (WHERE library.id IS NOT NULL), '[]') AS libraries_json`).
-		LeftJoin("user_library ul ON user.id = ul.user_id").
+		LeftJoin("user_library ul ON app_user.id = ul.user_id").
 		LeftJoin("library ON ul.library_id = library.id").
-		GroupBy("user.id")
+		GroupBy("app_user.id")
 }
 
 func (r *userRepository) CountAll(ctx context.Context, qo ...model.QueryOptions) (int64, error) {
@@ -93,7 +92,7 @@ func (r *userRepository) CountAll(ctx context.Context, qo ...model.QueryOptions)
 }
 
 func (r *userRepository) Get(ctx context.Context, id string) (*model.User, error) {
-	sel := r.selectUserWithLibraries(ctx).Where(Eq{"user.id": id})
+	sel := r.selectUserWithLibraries(ctx).Where(Eq{"app_user.id": id})
 	var res dbUser
 	err := r.queryOne(ctx, sel, &res)
 	if err != nil {
@@ -113,12 +112,22 @@ func (r *userRepository) GetAll(ctx context.Context, options ...model.QueryOptio
 }
 
 func (r *userRepository) Put(ctx context.Context, u *model.User) error {
+	return r.withTx(ctx, func(base sqlRepository) error {
+		scoped := *r
+		scoped.sqlRepository = base
+		return scoped.putUser(ctx, u)
+	})
+}
+
+func (r *userRepository) putUser(ctx context.Context, u *model.User) error {
 	if u.ID == "" {
 		u.ID = id.NewRandom()
 	}
-	u.UpdatedAt = time.Now()
+	u.UpdatedAt = databaseNow()
 	if u.NewPassword != "" {
-		_ = r.encryptPassword(ctx, u)
+		if err := r.encryptPassword(ctx, u); err != nil {
+			return err
+		}
 	}
 	values, err := toSQLArgs(*u)
 	if err != nil {
@@ -151,7 +160,7 @@ func (r *userRepository) Put(ctx context.Context, u *model.User) error {
 		isNewUser = count == 0
 	}
 	if isNewUser {
-		values["created_at"] = time.Now()
+		values["created_at"] = databaseNow()
 		insert := Insert(r.tableName).SetMap(values)
 		_, err = r.executeSQL(ctx, insert)
 		if err != nil {
@@ -162,7 +171,7 @@ func (r *userRepository) Put(ctx context.Context, u *model.User) error {
 	// Auto-assign all libraries to admin users in a single SQL operation
 	if u.IsAdmin {
 		sql := Expr(
-			"INSERT OR IGNORE INTO user_library (user_id, library_id) SELECT ?, id FROM library",
+			"INSERT INTO user_library (user_id, library_id) SELECT ?, id FROM library ON CONFLICT DO NOTHING",
 			u.ID,
 		)
 		if _, err := r.executeSQL(ctx, sql); err != nil {
@@ -171,7 +180,7 @@ func (r *userRepository) Put(ctx context.Context, u *model.User) error {
 	} else if isNewUser { // Only for new regular users
 		// Auto-assign default libraries to new regular users
 		sql := Expr(
-			"INSERT OR IGNORE INTO user_library (user_id, library_id) SELECT ?, id FROM library WHERE default_new_users = true",
+			"INSERT INTO user_library (user_id, library_id) SELECT ?, id FROM library WHERE default_new_users = true ON CONFLICT DO NOTHING",
 			u.ID,
 		)
 		if _, err := r.executeSQL(ctx, sql); err != nil {
@@ -189,7 +198,7 @@ func (r *userRepository) Put(ctx context.Context, u *model.User) error {
 }
 
 func (r *userRepository) FindFirstAdmin(ctx context.Context) (*model.User, error) {
-	sel := r.selectUserWithLibraries(ctx, model.QueryOptions{Sort: "updated_at", Max: 1}).Where(Eq{"user.is_admin": true})
+	sel := r.selectUserWithLibraries(ctx, model.QueryOptions{Sort: "updated_at", Max: 1}).Where(Eq{"app_user.is_admin": true})
 	var usr dbUser
 	err := r.queryOne(ctx, sel, &usr)
 	if err != nil {
@@ -199,7 +208,7 @@ func (r *userRepository) FindFirstAdmin(ctx context.Context) (*model.User, error
 }
 
 func (r *userRepository) FindByUsername(ctx context.Context, username string) (*model.User, error) {
-	sel := r.selectUserWithLibraries(ctx).Where(Expr("user.user_name = ? COLLATE NOCASE", username))
+	sel := r.selectUserWithLibraries(ctx).Where(Expr("lower(app_user.user_name) = lower(?)", username))
 	var usr dbUser
 	err := r.queryOne(ctx, sel, &usr)
 	if err != nil {
@@ -218,13 +227,13 @@ func (r *userRepository) FindByUsernameWithPassword(ctx context.Context, usernam
 }
 
 func (r *userRepository) UpdateLastLoginAt(ctx context.Context, id string) error {
-	upd := Update(r.tableName).Where(Eq{"id": id}).Set("last_login_at", time.Now())
+	upd := Update(r.tableName).Where(Eq{"id": id}).Set("last_login_at", databaseNow())
 	_, err := r.executeSQL(ctx, upd)
 	return err
 }
 
 func (r *userRepository) UpdateLastAccessAt(ctx context.Context, id string) error {
-	now := time.Now()
+	now := databaseNow()
 	upd := Update(r.tableName).Where(Eq{"id": id}).Set("last_access_at", now)
 	_, err := r.executeSQL(ctx, upd)
 	return err
@@ -371,6 +380,14 @@ func invalidScrobbleFilter() error {
 }
 
 func (r *userRepository) Delete(ctx context.Context, ids ...string) error {
+	return r.withTx(ctx, func(base sqlRepository) error {
+		scoped := *r
+		scoped.sqlRepository = base
+		return scoped.deleteUsers(ctx, ids...)
+	})
+}
+
+func (r *userRepository) deleteUsers(ctx context.Context, ids ...string) error {
 	usr := loggedUser(ctx)
 	if !usr.IsAdmin {
 		return rest.ErrPermissionDenied
@@ -379,8 +396,8 @@ func (r *userRepository) Delete(ctx context.Context, ids ...string) error {
 		if err := r.deleteByID(ctx, id); err != nil {
 			return err
 		}
-		if err := cleanupPluginUserReferences(r.db, id); err != nil {
-			log.Error(ctx, "Failed to cleanup plugin user references", "userID", id, err)
+		if err := cleanupPluginUserReferences(ctx, r.db, id); err != nil {
+			return fmt.Errorf("cleaning plugin user references: %w", err)
 		}
 	}
 	return nil
@@ -495,6 +512,14 @@ func (r *userRepository) GetUserLibraries(ctx context.Context, userID string) (m
 }
 
 func (r *userRepository) SetUserLibraries(ctx context.Context, userID string, libraryIDs []int) error {
+	return r.withTx(ctx, func(base sqlRepository) error {
+		scoped := *r
+		scoped.sqlRepository = base
+		return scoped.setUserLibraries(ctx, userID, libraryIDs)
+	})
+}
+
+func (r *userRepository) setUserLibraries(ctx context.Context, userID string, libraryIDs []int) error {
 	// Remove existing associations
 	delSql := Delete("user_library").Where(Eq{"user_id": userID})
 	if _, err := r.executeSQL(ctx, delSql); err != nil {

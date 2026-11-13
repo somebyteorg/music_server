@@ -48,7 +48,7 @@ var _ = Describe("localAgent GetSimilarSongsByTrack", func() {
 
 		sql, args, sqlErr := mfRepo.Options.Filters.ToSql()
 		Expect(sqlErr).ToNot(HaveOccurred())
-		Expect(sql).To(ContainSubstring("media_file_tags"), "must use the indexed join, not a json_tree scan")
+		Expect(sql).To(ContainSubstring("media_file_tags"), "must use the indexed join, not a JSON expansion")
 		Expect(sql).To(ContainSubstring("missing"))
 		Expect(args).To(ContainElement(false), "must exclude missing files, not select them")
 		Expect(args).To(ContainElement(rock.ID), "must filter on the seed's own genre tag id")

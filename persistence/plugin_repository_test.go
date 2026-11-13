@@ -74,7 +74,7 @@ var _ = Describe("PluginRepository", func() {
 				Expect(err).To(BeNil())
 				Expect(res.ID).To(Equal(plugin.ID))
 				Expect(res.Path).To(Equal(plugin.Path))
-				Expect(res.Manifest).To(Equal(plugin.Manifest))
+				Expect(res.Manifest).To(MatchJSON(plugin.Manifest))
 			})
 
 			It("errors when missing", func() {
@@ -125,8 +125,8 @@ var _ = Describe("PluginRepository", func() {
 				saved, err := repo.Get(ctx, plugin.ID)
 				Expect(err).To(BeNil())
 				Expect(saved.Path).To(Equal(plugin.Path))
-				Expect(saved.Manifest).To(Equal(plugin.Manifest))
-				Expect(saved.Config).To(Equal(plugin.Config))
+				Expect(saved.Manifest).To(MatchJSON(plugin.Manifest))
+				Expect(saved.Config).To(MatchJSON(plugin.Config))
 				Expect(saved.Enabled).To(BeFalse())
 				Expect(saved.CreatedAt).NotTo(BeZero())
 				Expect(saved.UpdatedAt).NotTo(BeZero())
@@ -151,7 +151,7 @@ var _ = Describe("PluginRepository", func() {
 				saved, err := repo.Get(ctx, plugin.ID)
 				Expect(err).To(BeNil())
 				Expect(saved.Enabled).To(BeTrue())
-				Expect(saved.Config).To(Equal(`{"new":"config"}`))
+				Expect(saved.Config).To(MatchJSON(`{"new":"config"}`))
 				Expect(saved.SHA256).To(Equal("updated"))
 			})
 
@@ -206,14 +206,16 @@ var _ = Describe("PluginRepository", func() {
 				Expect(err).To(BeNil())
 			})
 
-			It("does not need the write lock when no plugins have errors", func() {
+			It("does not wait for locked rows when no plugins have errors", func() {
 				_ = repo.Put(ctx, &model.Plugin{ID: "clean-plugin", Path: "/plugins/c.wasm", Manifest: "{}", SHA256: "h1"})
 				conn, err := db.Db().Conn(GinkgoT().Context())
 				Expect(err).ToNot(HaveOccurred())
-				DeferCleanup(conn.Close)
-				_, err = conn.ExecContext(GinkgoT().Context(), "BEGIN IMMEDIATE")
+				defer conn.Close()
+				_, err = conn.ExecContext(GinkgoT().Context(), "BEGIN")
 				Expect(err).ToNot(HaveOccurred())
-				DeferCleanup(func() { _, _ = conn.ExecContext(context.Background(), "ROLLBACK") })
+				defer func() { _, _ = conn.ExecContext(context.Background(), "ROLLBACK") }()
+				_, err = conn.ExecContext(GinkgoT().Context(), "SELECT id FROM plugin FOR UPDATE")
+				Expect(err).ToNot(HaveOccurred())
 
 				Expect(repo.ClearErrors(ctx)).To(Succeed())
 			})

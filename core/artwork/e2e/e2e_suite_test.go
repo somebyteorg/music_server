@@ -22,7 +22,7 @@ import (
 
 func TestArtworkE2E(t *testing.T) {
 	tests.Init(t, false)
-	log.SetLevel(log.LevelFatal)
+	log.SetLevel(log.LevelWarn)
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "Artwork Pipeline E2E Suite")
 }

@@ -57,21 +57,14 @@ var (
 	fakeFS  *storagetest.FakeFS
 )
 
-// The go-sqlite3 singleton holds the file open for the whole suite, and Windows cannot unlink a
-// file with a live handle, so the DB cannot live in Ginkgo's per-spec TempDir.
-var suiteDBTempDir string
-
 // Migrating the schema costs ~400ms, so it runs once per suite and specs reset by truncating.
 var userTables []string
 
 var _ = BeforeSuite(func() {
-	suiteDBTempDir = GinkgoT().TempDir()
-
 	DeferCleanup(configtest.SetupConfig())
-	conf.Server.DbPath = filepath.Join(suiteDBTempDir, "artwork-resolution-e2e.db") + "?_journal_mode=WAL"
 	conf.Server.DataFolder = conf.NewDir(GinkgoT().TempDir())
 	db.Db().SetMaxOpenConns(1)
-	db.Init(request.WithUser(context.Background(), model.User{ID: "admin-1", IsAdmin: true}))
+	tests.InitDB(request.WithUser(context.Background(), model.User{ID: "admin-1", IsAdmin: true}))
 
 	userTables = harness.ResettableTables()
 })
@@ -84,7 +77,6 @@ func setupResolutionHarness() {
 	DeferCleanup(configtest.SetupConfig())
 
 	tempDir := GinkgoT().TempDir()
-	conf.Server.DbPath = filepath.Join(suiteDBTempDir, "artwork-resolution-e2e.db") + "?_journal_mode=WAL"
 	conf.Server.DataFolder = conf.NewDir(tempDir)
 	conf.Server.MusicFolder = fakeLibPath
 	conf.Server.DevExternalScanner = false

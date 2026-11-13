@@ -87,9 +87,9 @@ var _ = Describe("Annotation Filters", func() {
 				Expect(sql).To(Equal(expectedSQL))
 				Expect(args).To(Equal(expectedArgs))
 			},
-			Entry("starred=true", "starred", "true", "COALESCE(starred, 0) > 0", []any(nil)),
-			Entry("starred=false", "starred", "false", "COALESCE(starred, 0) = 0", []any(nil)),
-			Entry("starred=True (case insensitive)", "starred", "True", "COALESCE(starred, 0) > 0", []any(nil)),
+			Entry("starred=true", "starred", "true", "coalesce(starred, false) = ?", []any{true}),
+			Entry("starred=false", "starred", "false", "coalesce(starred, false) = ?", []any{false}),
+			Entry("starred=True (case insensitive)", "starred", "True", "coalesce(starred, false) = ?", []any{true}),
 			Entry("rating=true", "rating", "true", "COALESCE(rating, 0) > 0", []any(nil)),
 			Entry("play_count=true", "play_count", "true", "COALESCE(play_count, 0) > 0", []any(nil)),
 			Entry("play_count=false", "play_count", "false", "COALESCE(play_count, 0) = 0", []any(nil)),
@@ -244,7 +244,7 @@ var _ = Describe("Annotation Filters", func() {
 			Expect(filtersNeedAnnotation(q)).To(BeTrue())
 		})
 
-		It("is true for uppercase/mixed-case annotation columns (SQLite is case-insensitive)", func() {
+		It("is true for uppercase/mixed-case annotation columns", func() {
 			q := squirrel.Select("count(1)").From("media_file").Where(squirrel.Expr("RATING > 0"))
 			Expect(filtersNeedAnnotation(q)).To(BeTrue())
 		})

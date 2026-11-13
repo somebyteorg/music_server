@@ -10,7 +10,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"time"
 
 	. "github.com/Masterminds/squirrel"
 	"github.com/deluan/rest"
@@ -82,7 +81,7 @@ func (a *dbAlbum) PostMapArgs(args map[string]any) error {
 	args["tags"] = marshalTags(a.Album.Tags)
 	args["participants"] = marshalParticipants(a.Album.Participants)
 
-	folderIDs, err := json.Marshal(a.Album.FolderIDs)
+	folderIDs, err := json.Marshal(append([]string{}, a.Album.FolderIDs...))
 	if err != nil {
 		return fmt.Errorf("marshalling album folder_ids: %w", err)
 	}
@@ -206,7 +205,15 @@ func (r *albumRepository) Exists(ctx context.Context, id string) (bool, error) {
 }
 
 func (r *albumRepository) Put(ctx context.Context, al *model.Album) error {
-	al.ImportedAt = time.Now()
+	return r.withTx(ctx, func(base sqlRepository) error {
+		scoped := *r
+		scoped.sqlRepository = base
+		return scoped.putAlbum(ctx, al)
+	})
+}
+
+func (r *albumRepository) putAlbum(ctx context.Context, al *model.Album) error {
+	al.ImportedAt = databaseNow()
 	id, err := r.put(ctx, al.ID, &dbAlbum{Album: al})
 	if err != nil {
 		return err
@@ -259,20 +266,9 @@ func (r *albumRepository) hydrateArtwork(ctx context.Context, albums model.Album
 		func(a *model.Album) (string, *model.ItemImage) { return a.ID, &a.ItemImage })
 }
 
-// getAllIDs returns the IDs of GetAll's row set, skipping its column projection and JSON decoding.
-func (r *albumRepository) getAllIDs(ctx context.Context, options ...model.QueryOptions) ([]string, error) {
-	sq := r.applyLibraryFilter(ctx, r.newSelect(ctx, options...).Columns("album.id"))
-	if filtersNeedAnnotation(sq) {
-		sq = r.withAnnotation(ctx, sq, "album.id")
-	}
-	ids := []string{}
-	err := r.queryAllSlice(ctx, sq, &ids)
-	return ids, err
-}
-
 // soleAlbumArtistFilter matches albums with exactly one album artist. The artist artwork
 // resolver and the scanner's image-change enqueue must select the same albums.
-var soleAlbumArtistFilter = Eq{"json_array_length(participants, '$.albumartist')": 1}
+var soleAlbumArtistFilter = Eq{"jsonb_array_length(participants -> 'albumartist')": 1}
 
 // SoleAlbumArtistFilter matches the albums where the given artist is the only album artist.
 // Matches by album-artist participation, not the deprecated album_artist_id column.
@@ -289,10 +285,10 @@ func (r *albumRepository) GetSoleAlbumArtistIDsInSubtrees(ctx context.Context, l
 	ids := []string{}
 	// Repeated IDs across chunks are fine: the queue upserts by PK.
 	for chunk := range slices.Chunk(paths, subtreePathChunkSize) {
-		inSubtree := Exists("json_each(album.folder_ids) je join folder on folder.id = je.value",
+		inSubtree := Exists("jsonb_array_elements_text(album.folder_ids) je(value) join folder on folder.id = je.value",
 			folderSubtreeFilter(lib, chunk))
 		// Sole album artist, so participants[0] is the only one.
-		sq := Select("distinct json_extract(participants, '$.albumartist[0].id')").From("album").
+		sq := Select("distinct jsonb_extract_path_text(participants, 'albumartist', '0', 'id')").From("album").
 			Where(And{soleAlbumArtistFilter, inSubtree})
 		var chunkIDs []string
 		if err := r.queryAllSlice(ctx, sq, &chunkIDs); err != nil {
@@ -304,13 +300,12 @@ func (r *albumRepository) GetSoleAlbumArtistIDsInSubtrees(ctx context.Context, l
 }
 
 func (r *albumRepository) GetCursor(ctx context.Context, options ...model.QueryOptions) (model.AlbumCursor, error) {
-	ids, err := r.getAllIDs(ctx, options...)
+	cursor, err := queryCursor[dbAlbum](ctx, r.sqlRepository, r.selectAlbum(ctx, options...))
 	if err != nil {
 		return nil, err
 	}
-	opts := chunkOptions(options, "album.id")
-	return model.AlbumCursor(streamByIDs(ids, func(chunk []string) (model.Albums, error) {
-		return r.GetAll(ctx, opts(chunk))
+	return model.AlbumCursor(hydrateCursor(iter.Seq2[model.Album, error](wrapAlbumCursor(cursor)), func(batch []model.Album) {
+		r.hydrateArtwork(ctx, batch)
 	})), nil
 }
 
@@ -329,30 +324,22 @@ func (r *albumRepository) GetYears(ctx context.Context, libraryIDs ...int) ([]in
 }
 
 func (r *albumRepository) CopyAttributes(ctx context.Context, fromID, toID string, columns ...string) error {
-	// Cast values to text so go-sqlite3 does not decode datetime columns as time.Time
-	// and reformat them as RFC3339 when written back.
-	sel := slice.Map(columns, func(c string) string { return fmt.Sprintf("cast(%[1]s as text) as %[1]s", c) })
-	var from dbx.NullStringMap
-	err := r.queryOne(ctx, Select(sel...).From(r.tableName).Where(Eq{"id": fromID}), &from)
-	if err != nil {
-		return fmt.Errorf("getting album to copy fields from: %w", err)
-	}
-	to := make(map[string]any)
-	for _, col := range columns {
-		v := from[col]
-		// created_at is aggregated from song birth_times and must never be
-		// overwritten with a zero/poisoned value, or it propagates forward on
-		// every metadata-driven album ID change.
-		if col == "created_at" && (!v.Valid || v.String == "" || strings.HasPrefix(v.String, "0001-")) {
-			continue
-		}
-		to[col] = v
-	}
-	if len(to) == 0 {
+	if len(columns) == 0 {
 		return nil
 	}
-	_, err = r.executeSQL(ctx, Update(r.tableName).SetMap(to).Where(Eq{"id": toID}))
-	return err
+	update := Update("album AS destination").From("album AS source").Where(Eq{"destination.id": toID, "source.id": fromID})
+	for _, column := range columns {
+		if !r.isFieldWhiteListed(column) {
+			return fmt.Errorf("invalid album attribute: %s", column)
+		}
+		value := "source." + column
+		if column == "created_at" {
+			value = "CASE WHEN source.created_at >= '0002-01-01'::timestamptz THEN source.created_at ELSE destination.created_at END"
+		}
+		update = update.Set(column, Expr(value))
+	}
+	var result struct{ ID string }
+	return r.queryOne(ctx, update.Suffix("RETURNING destination.id"), &result)
 }
 
 // Touch flags an album as being scanned by the scanner, but not necessarily updated.
@@ -362,7 +349,7 @@ func (r *albumRepository) Touch(ctx context.Context, ids ...string) error {
 		return nil
 	}
 	for ids := range slices.Chunk(ids, 200) {
-		upd := Update(r.tableName).Set("imported_at", time.Now()).Where(Eq{"id": ids})
+		upd := Update(r.tableName).Set("imported_at", databaseNow()).Where(Eq{"id": ids})
 		c, err := r.executeSQL(ctx, upd)
 		if err != nil {
 			return fmt.Errorf("error touching albums: %w", err)
@@ -374,10 +361,10 @@ func (r *albumRepository) Touch(ctx context.Context, ids ...string) error {
 
 // TouchByMissingFolder touches all albums that have missing folders
 func (r *albumRepository) TouchByMissingFolder(ctx context.Context) (int64, error) {
-	upd := Update(r.tableName).Set("imported_at", time.Now()).
+	upd := Update(r.tableName).Set("imported_at", databaseNow()).
 		Where(And{
 			NotEq{"folder_ids": nil},
-			ConcatExpr("EXISTS (SELECT 1 FROM json_each(folder_ids) AS je JOIN main.folder AS f ON je.value = f.id WHERE f.missing = true)"),
+			ConcatExpr("EXISTS (SELECT 1 FROM jsonb_array_elements_text(folder_ids) AS je(value) JOIN folder AS f ON je.value = f.id WHERE f.missing = true)"),
 		})
 	c, err := r.executeSQL(ctx, upd)
 	if err != nil {
@@ -395,7 +382,7 @@ func (r *albumRepository) GetTouchedAlbums(ctx context.Context, libID int) (mode
 			Eq{"library.id": libID},
 			ConcatExpr("album.imported_at > library.last_scan_at"),
 		})
-	cursor, err := queryWithStableResults[dbAlbum](ctx, r.sqlRepository, query)
+	cursor, err := queryCursor[dbAlbum](ctx, r.sqlRepository, query)
 	if err != nil {
 		return nil, err
 	}
@@ -444,18 +431,15 @@ func (r *albumRepository) purgeEmpty(ctx context.Context, libraryIDs ...int) err
 }
 
 var albumSearchConfig = searchConfig{
-	NaturalOrder: "album.rowid",
+	NaturalOrder: "album.id",
 	OrderBy:      []string{"name"},
 	MBIDFields:   []string{"mbz_album_id", "mbz_release_group_id"},
 }
 
 func (r *albumRepository) Search(ctx context.Context, q string, options ...model.QueryOptions) (model.Albums, error) {
-	var opts model.QueryOptions
-	if len(options) > 0 {
-		opts = options[0]
-	}
+
 	var res dbAlbums
-	err := r.doSearch(ctx, r.selectAlbum(ctx, options...), q, &res, albumSearchConfig, opts)
+	err := r.doSearch(ctx, r.selectAlbum(ctx, options...), q, &res, albumSearchConfig)
 	if err != nil {
 		return nil, fmt.Errorf("searching album %q: %w", q, err)
 	}

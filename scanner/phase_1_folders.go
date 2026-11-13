@@ -259,7 +259,7 @@ func (p *phaseFolders) processFolder(entry *folderEntry) (*folderEntry, error) {
 				p.state.sendWarning(fmt.Sprintf("Error getting file info for %s/%s: %v", entry.path, af.Name(), err))
 				return entry, nil
 			}
-			if info.ModTime().After(dbTrack.UpdatedAt) || dbTrack.Missing {
+			if info.ModTime().Truncate(time.Microsecond).After(dbTrack.UpdatedAt) || dbTrack.Missing {
 				filesToImport[fullPath] = dbTrack
 			}
 		}

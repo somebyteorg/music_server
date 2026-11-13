@@ -182,7 +182,7 @@ func runCreateUser(ctx context.Context) {
 
 	ds, ctx := getAdminContext(ctx)
 
-	err := ds.WithTx(func(tx model.DataStore) error {
+	err := ds.WithTx(ctx, func(tx model.DataStore) error {
 		existingUser, err := tx.User().FindByUsername(ctx, userID)
 		if existingUser != nil {
 			return fmt.Errorf("existing user '%s'", userID)
@@ -235,7 +235,7 @@ func runDeleteUser(ctx context.Context) {
 	var err error
 	var user *model.User
 
-	err = ds.WithTx(func(tx model.DataStore) error {
+	err = ds.WithTx(ctx, func(tx model.DataStore) error {
 		count, err := tx.User().CountAll(ctx)
 		if err != nil {
 			return err
@@ -267,7 +267,7 @@ func runUserEdit(ctx context.Context) {
 	var user *model.User
 	changes := []string{}
 
-	err = ds.WithTx(func(tx model.DataStore) error {
+	err = ds.WithTx(ctx, func(tx model.DataStore) error {
 		var newLibraries model.Libraries
 
 		user, err = getUser(ctx, userID, tx)

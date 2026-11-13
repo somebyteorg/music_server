@@ -75,17 +75,6 @@ var _ = Describe("PlaylistRepository", func() {
 		})
 	})
 
-	Describe("getAllIDs", func() {
-		It("returns the same id set as GetAll", func() {
-			want, err := repo.GetAll(ctx)
-			Expect(err).ToNot(HaveOccurred())
-			Expect(want).ToNot(BeEmpty())
-			ids, err := repo.(*playlistRepository).getAllIDs(ctx)
-			Expect(err).ToNot(HaveOccurred())
-			Expect(ids).To(ConsistOf(slice.Map(want, func(p model.Playlist) string { return p.ID })))
-		})
-	})
-
 	Describe("Exists", func() {
 		It("returns true for an existing playlist", func() {
 			Expect(repo.Exists(ctx, plsCool.ID)).To(BeTrue())
@@ -236,7 +225,7 @@ var _ = Describe("PlaylistRepository", func() {
 			// Older builds (and the star fallthrough) can leave a media_file-typed row
 			// under a playlist id; the item_type-scoped join must not surface or dupe it.
 			_, err := GetDBXBuilder().NewQuery(
-				"INSERT INTO annotation (user_id, item_id, item_type, starred) VALUES ({:uid}, {:id}, 'media_file', 1)").
+				"INSERT INTO annotation (user_id, item_id, item_type, starred) VALUES ({:uid}, {:id}, 'media_file', true)").
 				Bind(dbx.Params{"uid": "userid", "id": plsID}).Execute()
 			Expect(err).ToNot(HaveOccurred())
 

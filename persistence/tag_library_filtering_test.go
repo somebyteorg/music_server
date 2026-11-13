@@ -71,7 +71,7 @@ var _ = Describe("Tag Library Filtering", func() {
 
 		// Give admin access to all libraries
 		for _, libID := range []int{libraryID1, libraryID2, libraryID3} {
-			_, err = db.NewQuery("INSERT OR IGNORE INTO user_library (user_id, library_id) VALUES ({:user}, {:lib})").
+			_, err = db.NewQuery("INSERT INTO user_library (user_id, library_id) VALUES ({:user}, {:lib}) ON CONFLICT DO NOTHING").
 				Bind(dbx.Params{"user": adminUserID, "lib": libID}).Execute()
 			Expect(err).ToNot(HaveOccurred())
 		}

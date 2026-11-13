@@ -2,8 +2,6 @@ package persistence
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"fmt"
 	"time"
 
@@ -21,9 +19,8 @@ func (r sqlRepository) withBookmark(ctx context.Context, query SelectBuilder, id
 		return query
 	}
 	return query.
-		LeftJoin("bookmark on (" +
-			"bookmark.item_id = " + idField +
-			" AND bookmark.user_id = '" + userID + "')").
+		LeftJoin("bookmark on (bookmark.item_id = "+idField+
+			" AND bookmark.item_type = ? AND bookmark.user_id = ?)", r.tableName, userID).
 		Columns("coalesce(position, 0) as bookmark_position")
 }
 
@@ -38,32 +35,21 @@ func (r sqlRepository) bmkID(ctx context.Context, itemID ...string) And {
 func (r sqlRepository) bmkUpsert(ctx context.Context, itemID, comment string, position int64) error {
 	client, _ := request.ClientFrom(ctx)
 	user, _ := request.UserFrom(ctx)
+	now := databaseNow()
 	values := map[string]any{
 		"comment":    comment,
 		"position":   position,
-		"updated_at": time.Now(),
+		"updated_at": now,
 		"changed_by": client,
 	}
 
-	upd := Update(bookmarkTable).Where(r.bmkID(ctx, itemID)).SetMap(values)
-	c, err := r.executeSQL(ctx, upd)
-	if err == nil {
-		log.Debug(ctx, "Updated bookmark", "id", itemID, "user", user.UserName, "position", position, "comment", comment)
-	}
-	if c == 0 || errors.Is(err, sql.ErrNoRows) {
-		values["user_id"] = user.ID
-		values["item_type"] = r.tableName
-		values["item_id"] = itemID
-		values["created_at"] = time.Now()
-		values["updated_at"] = time.Now()
-		ins := Insert(bookmarkTable).SetMap(values)
-		_, err = r.executeSQL(ctx, ins)
-		if err != nil {
-			return err
-		}
-		log.Debug(ctx, "Added bookmark", "id", itemID, "user", user.UserName, "position", position, "comment", comment)
-	}
-
+	values["user_id"] = user.ID
+	values["item_type"] = r.tableName
+	values["item_id"] = itemID
+	values["created_at"] = now
+	_, err := r.executeSQL(ctx, Insert(bookmarkTable).SetMap(values).Suffix(`
+        ON CONFLICT (user_id, item_id, item_type) DO UPDATE SET comment = EXCLUDED.comment,
+        position = EXCLUDED.position, updated_at = EXCLUDED.updated_at, changed_by = EXCLUDED.changed_by`))
 	return err
 }
 
@@ -147,8 +133,11 @@ func (r sqlRepository) GetBookmarks(ctx context.Context) (model.Bookmarks, error
 }
 
 func (r sqlRepository) reassignBookmark(ctx context.Context, prevID, newID string) error {
-	upd := Expr("update or ignore "+bookmarkTable+" set item_id = ? where item_type = ? and item_id = ?",
-		newID, r.tableName, prevID)
+	upd := Expr(`WITH moved AS (
+        DELETE FROM bookmark WHERE item_type = ? AND item_id = ? RETURNING *
+    ) INSERT INTO bookmark (user_id, item_id, item_type, comment, position, changed_by, created_at, updated_at)
+      SELECT user_id, ?, item_type, comment, position, changed_by, created_at, updated_at FROM moved
+      ON CONFLICT (user_id, item_id, item_type) DO NOTHING`, r.tableName, prevID, newID)
 	_, err := r.executeSQL(ctx, upd)
 	return err
 }

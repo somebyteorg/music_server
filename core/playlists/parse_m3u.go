@@ -25,7 +25,7 @@ func (s *playlists) parseM3U(ctx context.Context, pls *model.Playlist, folder *m
 	}
 	var mfs model.MediaFiles
 	// Chunked so a huge playlist is not held in memory at once. Each line yields up to
-	// 4 lookup candidates (NFC/NFD × raw/lowercase), far below SQLite's 32766 variables.
+	// 4 lookup candidates (NFC/NFD × raw/lowercase).
 	for lines := range slice.CollectChunks(slice.LinesFrom(reader), 100) {
 		filteredLines := make([]string, 0, len(lines))
 		for _, line := range lines {
@@ -58,14 +58,12 @@ func (s *playlists) parseM3U(ctx context.Context, pls *model.Playlist, folder *m
 			continue
 		}
 
-		// SQLite comparisons do not perform Unicode normalization, and filesystem normalization
+		// Database comparisons do not perform Unicode normalization, and filesystem normalization
 		// differs across platforms (macOS often yields NFD, while Linux/Windows typically use NFC).
 		// Generate lookup candidates for both forms so playlist entries match DB paths regardless
 		// of the original normalization. See https://github.com/navidrome/navidrome/issues/4884
 		//
-		// We also include the original (non-lowercased) paths because SQLite's COLLATE NOCASE
-		// only handles ASCII case-insensitivity. Non-ASCII characters like fullwidth letters
-		// (e.g., ＡＢＣＤ vs ａｂｃｄ) are not matched case-insensitively by NOCASE.
+		// Keep the original spelling alongside case-folded paths for matching and resolution.
 		lookupCandidates := make([]string, 0, len(resolvedPaths)*4)
 		seen := make(map[string]struct{}, len(resolvedPaths)*4)
 		for _, path := range resolvedPaths {
@@ -81,7 +79,7 @@ func (s *playlists) parseM3U(ctx context.Context, pls *model.Playlist, folder *m
 				lookupCandidates = append(lookupCandidates, nfdRaw)
 			}
 
-			// Add lowercased paths (for ASCII case-insensitive matching via NOCASE)
+			// Add lowercased paths (for case-insensitive path matching)
 			nfc := strings.ToLower(nfcRaw)
 			if _, ok := seen[nfc]; !ok {
 				seen[nfc] = struct{}{}

@@ -161,7 +161,7 @@ func ArtistsByRole(opts Options, role model.Role) Options {
 	if _, ok := model.AllRoles[role.String()]; !ok {
 		return opts
 	}
-	roleFilter := Expr("JSON_EXTRACT(library_artist.stats, '$." + role.String() + ".m') IS NOT NULL")
+	roleFilter := Expr("jsonb_extract_path_text(library_artist.stats, ?, 'm') IS NOT NULL", role.String())
 	if opts.Filters == nil {
 		opts.Filters = roleFilter
 	} else {
@@ -205,12 +205,12 @@ func ArtistsByGenreID(genreIds []string) Sqlizer {
 // tagIDFilter builds an EXISTS over the given tag role's entries in the tags JSON, matching each
 // entry against cond (its name via Like, or its tag id via Eq/IN).
 func tagIDFilter(tagName string, cond Sqlizer) Sqlizer {
-	return persistence.Exists(`json_tree(tags, "$.`+tagName+`")`, And{NotEq{"atom": nil}, cond})
+	return persistence.TagFilter("tags", tagName, cond)
 }
 
 // ByStudioID matches items (albums or songs) whose record-label tag id is in ids.
 func ByStudioID(ids []string) Sqlizer {
-	return tagIDFilter("recordlabel", Eq{"value": ids})
+	return tagIDFilter("recordlabel", Eq{"id": ids})
 }
 
 func ByRating() Options {

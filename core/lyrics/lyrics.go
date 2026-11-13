@@ -79,8 +79,8 @@ func songsByArtistTitleWithLyricsFirst(artist, title string) model.QueryOptions 
 			Eq{"missing": false},
 			Eq{"title": title},
 			Or{
-				persistence.Exists("json_tree(participants, '$.albumartist')", Eq{"value": artist}),
-				persistence.Exists("json_tree(participants, '$.artist')", Eq{"value": artist}),
+				persistence.ParticipantNameFilter("media_file", artist, model.RoleAlbumArtist),
+				persistence.ParticipantNameFilter("media_file", artist, model.RoleArtist),
 			},
 		},
 	}

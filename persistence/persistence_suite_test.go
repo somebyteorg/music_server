@@ -7,8 +7,6 @@ import (
 	"time"
 
 	"github.com/Masterminds/squirrel"
-	_ "github.com/mattn/go-sqlite3"
-	"github.com/navidrome/navidrome/conf"
 	"github.com/navidrome/navidrome/db"
 	"github.com/navidrome/navidrome/log"
 	"github.com/navidrome/navidrome/model"
@@ -22,10 +20,7 @@ import (
 func TestPersistence(t *testing.T) {
 	tests.Init(t, true)
 
-	//os.Remove("./test-123.db")
-	//conf.Server.DbPath = "./test-123.db"
-	conf.Server.DbPath = "file::memory:?cache=shared&_foreign_keys=on"
-	defer db.Init(context.Background())()
+	tests.InitDB(context.Background())
 	log.SetLevel(log.LevelFatal)
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "Persistence Suite")
@@ -52,6 +47,7 @@ func al(al model.Album) model.Album {
 	al.LibraryPath = "music"
 	al.LibraryName = "Music Library"
 	al.Discs = model.Discs{}
+	al.FolderIDs = []string{}
 	al.Tags = model.Tags{}
 	al.Participants = model.Participants{}
 	return al
@@ -346,6 +342,9 @@ var _ = BeforeSuite(func() {
 			panic(err)
 		}
 	}
+	suiteSnapshot, err = tests.CaptureDatabase(ctx)
+	Expect(err).ToNot(HaveOccurred())
+
 })
 
 func GetDBXBuilder() *dbx.DB {
@@ -373,3 +372,6 @@ func collectCursor[T any](cursor func(func(T, error) bool), err error) []T {
 	}
 	return out
 }
+
+var suiteSnapshot *tests.DatabaseSnapshot
+var _ = BeforeEach(func() { Expect(suiteSnapshot.Restore(GinkgoT().Context())).To(Succeed()) })

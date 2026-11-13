@@ -39,14 +39,14 @@ var _ = Describe("ScrobbleRepository", func() {
 		AfterEach(func() {
 			_, _ = rawRepo.db.Delete("scrobbles", dbx.HashExp{"media_file_id": fileID}).Execute()
 			_, _ = rawRepo.db.Delete("media_file", dbx.HashExp{"id": fileID}).Execute()
-			_, _ = rawRepo.db.Delete("user", dbx.HashExp{"id": userID}).Execute()
+			_, _ = rawRepo.db.Delete("app_user", dbx.HashExp{"id": userID}).Execute()
 		})
 
 		It("records a scrobble event", func() {
 			submissionTime := time.Now().UTC()
 
 			// Insert User
-			_, err := rawRepo.db.Insert("user", dbx.Params{
+			_, err := rawRepo.db.Insert("app_user", dbx.Params{
 				"id":         userID,
 				"user_name":  "user",
 				"password":   "pw",

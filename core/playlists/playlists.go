@@ -125,7 +125,7 @@ func (s *playlists) Tracks(ctx context.Context, id string) (model.PlaylistTrackR
 // playlist (when playlistId is provided). This matches the Subsonic createPlaylist semantics.
 func (s *playlists) Create(ctx context.Context, playlistId string, name string, ids []string) (string, error) {
 	usr, _ := request.UserFrom(ctx)
-	err := s.ds.WithTxImmediate(func(tx model.DataStore) error {
+	err := s.ds.WithTx(ctx, func(tx model.DataStore) error {
 		var pls *model.Playlist
 		var err error
 
@@ -185,7 +185,7 @@ func (s *playlists) Update(ctx context.Context, playlistID string,
 	if err != nil {
 		return err
 	}
-	return s.ds.WithTxImmediate(func(tx model.DataStore) error {
+	return s.ds.WithTx(ctx, func(tx model.DataStore) error {
 		repo := tx.Playlist()
 
 		if len(idxToRemove) > 0 {
@@ -278,9 +278,8 @@ func (s *playlists) InsertTracks(ctx context.Context, playlistID string, ids []s
 		return 0, err
 	}
 	var count int
-	// Immediate: a deferred tx that reads before shifting fails at once with SQLITE_BUSY under
-	// concurrent writers instead of waiting for the lock.
-	err := s.ds.WithTxImmediate(func(tx model.DataStore) error {
+	// The track repository locks this playlist until its position changes commit.
+	err := s.ds.WithTx(ctx, func(tx model.DataStore) error {
 		var err error
 		count, err = tx.Playlist().Tracks(ctx, playlistID, false).Insert(ctx, ids, pos)
 		return err
@@ -313,7 +312,7 @@ func (s *playlists) RemoveTracks(ctx context.Context, playlistID string, trackId
 	if _, err := s.checkTracksEditable(ctx, playlistID); err != nil {
 		return err
 	}
-	return s.ds.WithTx(func(tx model.DataStore) error {
+	return s.ds.WithTx(ctx, func(tx model.DataStore) error {
 		return tx.Playlist().Tracks(ctx, playlistID, false).Delete(ctx, trackIds...)
 	})
 }
@@ -322,7 +321,7 @@ func (s *playlists) ReorderTrack(ctx context.Context, playlistID string, pos int
 	if _, err := s.checkTracksEditable(ctx, playlistID); err != nil {
 		return err
 	}
-	return s.ds.WithTxImmediate(func(tx model.DataStore) error {
+	return s.ds.WithTx(ctx, func(tx model.DataStore) error {
 		return tx.Playlist().Tracks(ctx, playlistID, false).Reorder(ctx, pos, newPos)
 	})
 }

@@ -321,11 +321,7 @@ func (db *MockDataStore) ArtworkQueue() model.ArtworkQueueRepository {
 	return db.MockedArtworkQueue
 }
 
-func (db *MockDataStore) WithTx(block func(tx model.DataStore) error, label ...string) error {
-	return block(db)
-}
-
-func (db *MockDataStore) WithTxImmediate(block func(tx model.DataStore) error, label ...string) error {
+func (db *MockDataStore) WithTx(ctx context.Context, block func(tx model.DataStore) error, label ...string) error {
 	return block(db)
 }
 

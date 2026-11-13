@@ -54,11 +54,11 @@ func (r *tagRepository) Add(ctx context.Context, libraryID int, tags ...model.Ta
 func (r *tagRepository) UpdateCounts(ctx context.Context) error {
 	template := `
 INSERT INTO library_tag (tag_id, library_id, %[1]s_count)
-SELECT jt.value as tag_id, %[1]s.library_id, count(distinct %[1]s.id) as %[1]s_count
+SELECT it.tag_id, %[1]s.library_id, count(distinct %[1]s.id) as %[1]s_count
 FROM %[1]s
-JOIN json_tree(%[1]s.tags, '$.genre') as jt ON jt.atom IS NOT NULL AND jt.key = 'id'
-JOIN tag ON tag.id = jt.value
-GROUP BY jt.value, %[1]s.library_id
+JOIN %[1]s_tags it ON it.%[1]s_id = %[1]s.id
+JOIN tag ON tag.id = it.tag_id AND tag.tag_name = 'genre'
+GROUP BY it.tag_id, %[1]s.library_id
 ON CONFLICT (tag_id, library_id) 
 DO UPDATE SET %[1]s_count = excluded.%[1]s_count;
 `
@@ -83,17 +83,18 @@ func (r *tagRepository) GetAll(ctx context.Context, name model.TagName, options 
 }
 
 func (r *tagRepository) purgeUnused(ctx context.Context) error {
-	del := Delete(r.tableName).Where(`
-	id not in (select jt.value
-	from album left join json_tree(album.tags, '$') as jt
-	where atom is not null
-	  and key = 'id'
-	UNION
-	select jt.value
-	from media_file left join json_tree(media_file.tags, '$') as jt
-	where atom is not null
-	  and key = 'id')
-`)
+	// Junction tables only materialize selected tag types. Collect every JSON
+	// reference once so other metadata tags survive cleanup too.
+	del := Delete(r.tableName).Prefix(`WITH used_tags AS MATERIALIZED (
+        SELECT t.id FROM album
+        CROSS JOIN LATERAL jsonb_each(album.tags) AS roles
+        CROSS JOIN LATERAL jsonb_to_recordset(roles.value) AS t(id text)
+        UNION
+        SELECT t.id FROM media_file
+        CROSS JOIN LATERAL jsonb_each(media_file.tags) AS roles
+        CROSS JOIN LATERAL jsonb_to_recordset(roles.value) AS t(id text)
+    )`).Where("NOT EXISTS (SELECT 1 FROM used_tags WHERE used_tags.id = tag.id)")
+
 	c, err := r.executeSQL(ctx, del)
 	if err != nil {
 		return fmt.Errorf("error purging %s unused tags: %w", r.tableName, err)

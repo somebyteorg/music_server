@@ -14,7 +14,7 @@ import (
 	"github.com/pocketbase/dbx"
 )
 
-// Keeps each multi-row insert under SQLite's bind-variable limit (at most 7 vars per row).
+// Bound the size of each artwork queue insert.
 const enqueueChunkSize = 100
 
 // Every insert writes these, in this order; the INSERT..SELECT forms must project them to match.
@@ -46,13 +46,13 @@ func (r *artworkQueueRepository) Get(ctx context.Context, kind model.Kind, id, i
 // row's spent retry budget) and clears trace (so explain does not show a prior failure at attempts 0).
 func (r *artworkQueueRepository) Enqueue(ctx context.Context, items ...model.ArtworkQueueItem) error {
 	return r.enqueue(ctx, `ON CONFLICT (item_kind, item_id, image_type) DO UPDATE SET
-		priority = MAX(priority, excluded.priority), retry_at = excluded.retry_at,
+		priority = GREATEST(artwork_queue.priority, excluded.priority), retry_at = excluded.retry_at,
 		attempts = 0, enqueued_at = excluded.enqueued_at, trace = '[]'`, items)
 }
 
 func (r *artworkQueueRepository) EnqueuePreservingBackoff(ctx context.Context, items ...model.ArtworkQueueItem) error {
 	return r.enqueue(ctx, `ON CONFLICT (item_kind, item_id, image_type) DO UPDATE SET
-		priority = MAX(priority, excluded.priority)`, items)
+		priority = GREATEST(artwork_queue.priority, excluded.priority)`, items)
 }
 
 func (r *artworkQueueRepository) EnqueueAllMissing(ctx context.Context, kind model.Kind, priority int) (int64, error) {
@@ -60,7 +60,7 @@ func (r *artworkQueueRepository) EnqueueAllMissing(ctx context.Context, kind mod
 	if !ok {
 		return 0, fmt.Errorf("artwork queue: no entity table for kind %q", kind.Prefix())
 	}
-	now := time.Now()
+	now := databaseNow()
 	return r.insertIfNotQueued(ctx, "", `SELECT ?, id, ?, ?, 0, ?, ?
 		FROM `+entityTable+`
 		WHERE id NOT IN (SELECT item_id FROM `+itemArtworkTable+` WHERE item_kind = ?)`,
@@ -68,12 +68,12 @@ func (r *artworkQueueRepository) EnqueueAllMissing(ctx context.Context, kind mod
 }
 
 func (r *artworkQueueRepository) EnqueueIfMissing(ctx context.Context, items ...model.ArtworkQueueItem) error {
-	now := time.Now()
+	now := databaseNow()
 	for chunk := range slices.Chunk(items, enqueueChunkSize) {
 		rows := make([]string, 0, len(chunk))
 		args := make([]any, 0, len(chunk)*4+2)
 		for _, it := range chunk {
-			rows = append(rows, "(?,?,?,?)")
+			rows = append(rows, "(?,?,?,CAST(? AS integer))")
 			args = append(args, it.ItemKind, it.ItemID, cmp.Or(it.ImageType, model.ImageTypePrimary), it.Priority)
 		}
 		args = append(args, now, now)
@@ -115,7 +115,7 @@ func artworkSourceFilter(kind model.Kind, sources []string) Sqlizer {
 		match = append(match, Eq{"source": stored})
 	}
 	if len(stored) != len(sources) {
-		match = append(match, And{Eq{"hash": ""}, NotEq{"last_failure": ""}})
+		match = append(match, And{Eq{"hash": ""}, NotEq{"last_failure": nil}})
 	}
 	return append(f, match)
 }
@@ -140,7 +140,7 @@ func (r *artworkQueueRepository) SourcesInUse(ctx context.Context, kind model.Ki
 // EnqueueBySource deliberately leaves item_artwork alone: clearing state in bulk would blank the
 // library's artwork until every item is resolved again.
 func (r *artworkQueueRepository) EnqueueBySource(ctx context.Context, kind model.Kind, sources []string, priority int) (int64, error) {
-	now := time.Now()
+	now := databaseNow()
 	sel := Select("item_kind", "item_id", "image_type").
 		Column(Expr("?", priority)).Column("0").Column(Expr("?", now)).Column(Expr("?", now)).
 		From(itemArtworkTable).Where(artworkSourceFilter(kind, sources))
@@ -148,7 +148,7 @@ func (r *artworkQueueRepository) EnqueueBySource(ctx context.Context, kind model
 }
 
 func (r *artworkQueueRepository) enqueue(ctx context.Context, conflict string, items []model.ArtworkQueueItem) error {
-	now := time.Now()
+	now := databaseNow()
 	for chunk := range slices.Chunk(items, enqueueChunkSize) {
 		ins := Insert(r.tableName).Columns(enqueueColumns...)
 		for _, it := range chunk {
@@ -164,7 +164,7 @@ func (r *artworkQueueRepository) enqueue(ctx context.Context, conflict string, i
 
 func (r *artworkQueueRepository) DequeueBatch(ctx context.Context, n int, kinds ...string) ([]model.ArtworkQueueItem, error) {
 	sel := Select(enqueueColumns...).From(r.tableName).
-		Where(LtOrEq{"retry_at": time.Now()}).
+		Where(LtOrEq{"retry_at": databaseNow()}).
 		OrderBy("priority DESC", "enqueued_at ASC").
 		Limit(uint64(n))
 	if len(kinds) > 0 {
@@ -179,7 +179,7 @@ func (r *artworkQueueRepository) MarkFailedIfUnchanged(ctx context.Context, kind
 	upd := Update(r.tableName).
 		Set("attempts", Expr("attempts + 1")).
 		Set("retry_at", retryAt).
-		Set("trace", trace).
+		Set("trace", cmp.Or(trace, "[]")).
 		Where(Eq{"item_kind": kind, "item_id": id, "image_type": imageType, "retry_at": seenRetryAt})
 	_, err := r.executeSQL(ctx, upd)
 	return err
@@ -193,8 +193,8 @@ func (r *artworkQueueRepository) PurgeDangling(ctx context.Context) (int64, erro
 	return purgeDangling(ctx, r.sqlRepository)
 }
 
-// artworkQueueFilter returns no conditions for an empty filter, so an unfiltered DELETE keeps
-// SQLite's truncate path. It ignores retry_at: a backing-off row is pending work too.
+// artworkQueueFilter leaves an empty filter unrestricted. It ignores retry_at:
+// a backing-off row is pending work too.
 func artworkQueueFilter(kinds []model.Kind, priorities []int) And {
 	var f And
 	if len(kinds) > 0 {

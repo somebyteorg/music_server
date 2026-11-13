@@ -128,7 +128,6 @@ var _ = Describe("Configuration", func() {
 		Entry("normalizes 'FTS' to lowercase", "FTS", "fts"),
 		Entry("normalizes 'Legacy' to lowercase", "Legacy", "legacy"),
 		Entry("trims whitespace", "  fts  ", "fts"),
-		Entry("falls back to 'fts' for 'fts5'", "fts5", "fts"),
 		Entry("falls back to 'fts' for unrecognized values", "invalid", "fts"),
 		Entry("falls back to 'fts' for empty string", "", "fts"),
 	)

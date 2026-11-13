@@ -1042,9 +1042,9 @@ var _ = Describe("Playlists - Import", func() {
 			Entry("ignores a library the owner cannot access", "file:///new/cover.jpg", ""),
 		)
 
-		// Fullwidth characters (e.g., ＡＢＣＤ) are not handled by SQLite's NOCASE collation,
+		// Fullwidth characters (e.g., ＡＢＣＤ) must preserve their original path,
 		// so we need exact matching for non-ASCII characters.
-		It("matches fullwidth characters exactly (SQLite NOCASE limitation)", func() {
+		It("matches fullwidth characters exactly", func() {
 			// Fullwidth uppercase ＡＣＲＯＳＳ (U+FF21, U+FF23, U+FF32, U+FF2F, U+FF33, U+FF33)
 			repo.data = []string{
 				"plex/02 - ＡＣＲＯＳＳ.flac",
@@ -1227,8 +1227,8 @@ func (r *mockedMediaFileFromListRepo) FindByPaths(ctx context.Context, paths []s
 				}
 			}
 
-			// Case-insensitive comparison (like SQL's "collate nocase"), but with no
-			// implicit Unicode normalization (SQLite does not normalize NFC/NFD).
+			// Case-insensitive comparison, with no
+			// implicit Unicode normalization (paths preserve their original normalization).
 			if strings.EqualFold(actualPath, dataPath) {
 				mfs = append(mfs, model.MediaFile{
 					ID:        strconv.Itoa(idx),

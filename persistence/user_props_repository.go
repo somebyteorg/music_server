@@ -21,16 +21,8 @@ func NewUserPropsRepository(db dbx.Builder) model.UserPropsRepository {
 }
 
 func (r userPropsRepository) Put(ctx context.Context, userId, key string, value string) error {
-	update := Update(r.tableName).Set("value", value).Where(And{Eq{"user_id": userId}, Eq{"key": key}})
-	count, err := r.executeSQL(ctx, update)
-	if err != nil {
-		return err
-	}
-	if count > 0 {
-		return nil
-	}
-	insert := Insert(r.tableName).Columns("user_id", "key", "value").Values(userId, key, value)
-	_, err = r.executeSQL(ctx, insert)
+	_, err := r.executeSQL(ctx, Insert(r.tableName).Columns("user_id", "key", "value").Values(userId, key, value).
+		Suffix("ON CONFLICT (user_id, key) DO UPDATE SET value = EXCLUDED.value"))
 	return err
 }
 

@@ -24,7 +24,7 @@ var _ = Describe("sqlRepository", func() {
 			Expect(strategy).ToNot(BeNil())
 			sql, _, err := strategy.ToSql()
 			Expect(err).ToNot(HaveOccurred())
-			Expect(sql).To(ContainSubstring("MATCH"))
+			Expect(sql).To(ContainSubstring("@@ to_tsquery"))
 		})
 
 		It("returns legacy LIKE strategy when SearchBackend is legacy", func() {
@@ -62,7 +62,7 @@ var _ = Describe("sqlRepository", func() {
 			Expect(err).ToNot(HaveOccurred())
 			// CJK should use LIKE, not MATCH
 			Expect(sql).To(ContainSubstring("LIKE"))
-			Expect(sql).NotTo(ContainSubstring("MATCH"))
+			Expect(sql).NotTo(ContainSubstring("@@ to_tsquery"))
 		})
 
 		It("routes non-CJK queries to FTS strategy", func() {
@@ -74,7 +74,7 @@ var _ = Describe("sqlRepository", func() {
 			Expect(strategy).ToNot(BeNil())
 			sql, _, err := strategy.ToSql()
 			Expect(err).ToNot(HaveOccurred())
-			Expect(sql).To(ContainSubstring("MATCH"))
+			Expect(sql).To(ContainSubstring("@@ to_tsquery"))
 		})
 
 		It("returns non-nil for single-character query (no min-length in strategy)", func() {
