@@ -1,0 +1,29 @@
+/**
+ * For more details on how to configure Wrangler, refer to:
+ * https://developers.cloudflare.com/workers/wrangler/configuration/
+ */
+{
+    "$schema": "node_modules/wrangler/config-schema.json",
+    "name": "emos-music-server-web",
+    "compatibility_date": "2026-11-14",
+    "assets": {
+        "base_path": "/web",
+        "html_handling": "auto-trailing-slash",
+        "not_found_handling": "none",
+        "directory": "./build",
+    },
+    "observability": {
+        "logs": {
+            "enabled": false,
+        },
+        "traces": {
+            "enabled": false,
+        },
+    },
+    "routes": [
+        {
+            "pattern": "music.emos.best/web*",
+            "zone_name": "emos.best",
+        },
+    ],
+}
