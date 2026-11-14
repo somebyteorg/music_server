@@ -11,7 +11,6 @@ import { HotKeys } from 'react-hotkeys'
 import dataProvider from './dataProvider'
 import authProvider from './authProvider'
 import { Layout, Login, Logout } from './layout'
-import transcoding from './transcoding'
 import player from './player'
 import user from './user'
 import song from './song'
@@ -20,7 +19,6 @@ import artist from './artist'
 import playlist from './playlist'
 import radio from './radio'
 import share from './share'
-import library from './library'
 import plugin from './plugin'
 import { Player } from './audioplayer'
 import customRoutes from './routes'
@@ -38,7 +36,6 @@ import {
   replayGainReducer,
   downloadMenuDialogReducer,
   shareDialogReducer,
-  transcodingReducer,
 } from './reducers'
 import createAdminStore from './store/createAdminStore'
 import { i18nProvider, retrieveTranslation } from './i18n'
@@ -79,7 +76,6 @@ const adminStore = createAdminStore({
     activity: activityReducer,
     settings: settingsReducer,
     replayGain: replayGainReducer,
-    transcoding: transcodingReducer,
   },
 })
 
@@ -143,22 +139,7 @@ const Admin = (props) => {
           {...player}
           options={{ subMenu: 'settings', label: 'resources.player.menuName' }}
         />,
-        permissions === 'admin' ? (
-          <Resource
-            name="transcoding"
-            {...transcoding}
-            options={{ subMenu: 'settings' }}
-          />
-        ) : (
-          <Resource name="transcoding" />
-        ),
-        permissions === 'admin' ? (
-          <Resource
-            name="library"
-            {...library}
-            options={{ subMenu: 'settings' }}
-          />
-        ) : null,
+        <Resource name="library" />,
         permissions === 'admin' ? (
           <Resource
             name="missing"
@@ -179,8 +160,6 @@ const Admin = (props) => {
         <Resource name="tag" />,
         <Resource name="playlistTrack" />,
         <Resource name="keepalive" />,
-        <Resource name="insights" />,
-        <Resource name="config" />,
         <Player />,
       ]}
     </RAAdmin>
@@ -189,7 +168,8 @@ const Admin = (props) => {
 }
 
 const AppWithHotkeys = () => {
-  let language = localStorage.getItem('locale') || 'en'
+  let language =
+    localStorage.getItem('locale') || config.defaultLanguage || 'zh-Hans'
   document.documentElement.lang = language
   if (config.enableSharing && shareInfo) {
     return <SharePlayer />

@@ -2,7 +2,7 @@ package persistence
 
 import (
 	"context"
-	"database/sql"
+	"fmt"
 	"slices"
 
 	. "github.com/Masterminds/squirrel"
@@ -53,7 +53,7 @@ func (r *playlistRepository) Tracks(ctx context.Context, playlistId string, refr
 	})
 	p.setSortMappings(
 		map[string]string{
-			"id":           "playlist_tracks.id",
+			"id":           "playlist_tracks.sort_key, playlist_tracks.id",
 			"artist":       "order_artist_name",
 			"album_artist": "order_album_artist_name",
 			"album":        "order_album_name, album_id, disc_number, track_number, order_artist_name, " + naturalSort("f.title"),
@@ -109,6 +109,7 @@ func (r *playlistTrackRepository) Read(ctx context.Context, id string) (*model.P
 			"rated_at",
 			"f.*",
 			"playlist_tracks.*",
+			"(SELECT count(*) FROM playlist_tracks preceding WHERE preceding.playlist_id = playlist_tracks.playlist_id AND (preceding.sort_key, preceding.id) <= (playlist_tracks.sort_key, playlist_tracks.id)) AS position",
 		).
 		Join("media_file f on f.id = media_file_id").
 		Where(And{Eq{"playlist_id": r.playlistId}, Eq{"playlist_tracks.id": id}})
@@ -146,7 +147,7 @@ func (r *playlistTrackRepository) GetMediaFileIDs(ctx context.Context, options .
 		Join("media_file f on f.id = media_file_id").
 		Where(Eq{"playlist_id": r.playlistId})
 	query = r.applyLibraryFilter(ctx, query, "f")
-	query = query.OrderBy("playlist_tracks.id")
+	query = query.OrderBy("playlist_tracks.sort_key", "playlist_tracks.id")
 	var ids []string
 	if err := r.queryAllSlice(ctx, query, &ids); err != nil {
 		return nil, err
@@ -177,50 +178,66 @@ func (r *playlistTrackRepository) ReadAll(ctx context.Context, options ...rest.Q
 	return r.GetAll(ctx, r.parseRestOptions(ctx, options...))
 }
 
-func (r *playlistTrackRepository) add(ctx context.Context, mediaFileIds []string) (int, error) {
-	if len(mediaFileIds) > 0 {
-		log.Debug(ctx, "Adding songs to playlist", "playlistId", r.playlistId, "mediaFileIds", mediaFileIds)
-	} else {
-		return 0, nil
-	}
-
-	// Get next pos (ID) in playlist
-	sq := r.newSelect(ctx).Columns("max(id) as max").Where(Eq{"playlist_id": r.playlistId})
-	var res struct{ Max sql.NullInt32 }
-	if err := r.queryOne(ctx, sq, &res); err != nil {
-		return 0, err
-	}
-
-	return r.playlistRepo.addTracks(ctx, r.playlistId, int(res.Max.Int32+1), mediaFileIds)
+func (r *playlistTrackRepository) add(ctx context.Context, ids []string) (int, error) {
+	return r.playlistRepo.addTracks(ctx, r.playlistId, ids)
 }
 
-// Insert adds tracks before the 1-based position pos, shifting the following entries down; a
-// position past the end appends. Callers must run it in a transaction.
-func (r *playlistTrackRepository) insert(ctx context.Context, mediaFileIds []string, pos int) (int, error) {
-	if len(mediaFileIds) == 0 {
-		return 0, nil
+// insert reserves spaced ordering keys between the neighboring entries.
+func (r *playlistTrackRepository) insert(ctx context.Context, ids []string, position int) (int, error) {
+	ids, err := r.playlistRepo.keepAccessible(ctx, ids)
+	if err != nil || len(ids) == 0 {
+		return 0, err
 	}
-	pos = max(pos, 1)
-	n := len(mediaFileIds)
-	// Negate while shifting, so no intermediate row hits the unique (playlist_id, id) index.
-	_, err := r.executeSQL(ctx, Expr(`UPDATE playlist_tracks SET id = -(id + ?) WHERE playlist_id = ? AND id >= ?`, n, r.playlistId, pos))
+	before, after, err := r.neighbors(ctx, "", position)
 	if err != nil {
 		return 0, err
 	}
-	res, err := r.executeSQL(ctx, Expr(`UPDATE playlist_tracks SET id = -id WHERE playlist_id = ? AND id < 0`, r.playlistId))
-	if err != nil {
-		return 0, err
+	step := playlistSortGap
+	if after != 0 {
+		step = (after - before) / int64(len(ids)+1)
 	}
-	if res == 0 {
-		return r.Add(ctx, mediaFileIds)
+	if step < 1 {
+		if err := r.playlistRepo.renumber(ctx, r.playlistId); err != nil {
+			return 0, err
+		}
+		before, after, err = r.neighbors(ctx, "", position)
+		if err != nil {
+			return 0, err
+		}
+		step = (after - before) / int64(len(ids)+1)
+		if step < 1 {
+			return 0, fmt.Errorf("too many tracks for an insertion")
+		}
 	}
-	inserted, err := r.playlistRepo.addTracks(ctx, r.playlistId, pos, mediaFileIds)
-	if err != nil || inserted == n {
-		return inserted, err
+	return r.playlistRepo.insertTracks(ctx, r.playlistId, before, step, ids)
+}
+
+func (r *playlistTrackRepository) neighbors(ctx context.Context, exclude string, position int) (int64, int64, error) {
+	position = max(position, 1)
+	query := Select("sort_key").From("playlist_tracks").Where(Eq{"playlist_id": r.playlistId}).OrderBy("sort_key", "id")
+	if exclude != "" {
+		query = query.Where(NotEq{"id": exclude})
 	}
-	// The shift above reserved a slot per requested id, so ids dropped by keepAccessible
-	// leave a hole. Close it.
-	return inserted, r.playlistRepo.renumber(ctx, r.playlistId)
+	query = query.Offset(uint64(max(position-2, 0))).Limit(2)
+	var keys []int64
+	if err := r.queryAllSlice(ctx, query, &keys); err != nil {
+		return 0, 0, err
+	}
+	if position == 1 {
+		if len(keys) > 0 {
+			return 0, keys[0], nil
+		}
+		return 0, 0, nil
+	}
+	if len(keys) == 2 {
+		return keys[0], keys[1], nil
+	}
+	if len(keys) == 1 {
+		return keys[0], 0, nil
+	}
+	var last struct{ Key int64 }
+	err := r.queryOne(ctx, Select("coalesce(max(sort_key), 0) AS key").From("playlist_tracks").Where(Eq{"playlist_id": r.playlistId}), &last)
+	return last.Key, 0, err
 }
 
 func (r *playlistTrackRepository) addMediaFileIds(ctx context.Context, cond Sqlizer) (int, error) {
@@ -264,67 +281,42 @@ func (r *playlistTrackRepository) deleteTracks(ctx context.Context, ids ...strin
 			return err
 		}
 	}
-
-	return r.playlistRepo.renumber(ctx, r.playlistId)
+	return nil
 }
 
 func (r *playlistTrackRepository) deleteAllTracks(ctx context.Context) error {
-	err := r.delete(ctx, Eq{"playlist_id": r.playlistId})
-	if err != nil {
-		return err
-	}
-
-	return r.playlistRepo.renumber(ctx, r.playlistId)
+	return r.delete(ctx, Eq{"playlist_id": r.playlistId})
 }
 
-// Reorder moves a track from pos to newPos, shifting other tracks accordingly. newPos is clamped
-// to the playlist; a pos outside it is ErrNotFound, since shifting around it would leave a gap.
-func (r *playlistTrackRepository) reorder(ctx context.Context, pos int, newPos int) error {
-	var res struct{ Max sql.NullInt32 }
-	if err := r.queryOne(ctx, r.newSelect(ctx).Columns("max(id) as max").Where(Eq{"playlist_id": r.playlistId}), &res); err != nil {
+// reorder moves a stable entry id to a 1-based list position.
+func (r *playlistTrackRepository) reorder(ctx context.Context, entryID int, position int) error {
+	var entry struct{ ID string }
+	if err := r.queryOne(ctx, Select("id").From("playlist_tracks").Where(Eq{"playlist_id": r.playlistId, "id": entryID}), &entry); err != nil {
 		return err
 	}
-	last := int(res.Max.Int32)
-	if pos < 1 || pos > last {
-		return model.ErrNotFound
+	var count struct{ Count int }
+	if err := r.queryOne(ctx, Select("count(*) AS count").From("playlist_tracks").Where(Eq{"playlist_id": r.playlistId}), &count); err != nil {
+		return err
 	}
-	newPos = min(max(newPos, 1), last)
-	if pos == newPos {
-		return nil
-	}
-	pid := r.playlistId
-
-	// Step 1: Move the source track out of the way (temporary sentinel value)
-	_, err := r.executeSQL(ctx, Expr(
-		`UPDATE playlist_tracks SET id = -999999 WHERE playlist_id = ? AND id = ?`, pid, pos))
+	position = min(max(position, 1), count.Count)
+	before, after, err := r.neighbors(ctx, entry.ID, position)
 	if err != nil {
 		return err
 	}
-
-	// Step 2: Shift the affected range using negative values to avoid unique constraint violations
-	if pos < newPos {
-		_, err = r.executeSQL(ctx, Expr(
-			`UPDATE playlist_tracks SET id = -(id - 1) WHERE playlist_id = ? AND id > ? AND id <= ?`,
-			pid, pos, newPos))
-	} else {
-		_, err = r.executeSQL(ctx, Expr(
-			`UPDATE playlist_tracks SET id = -(id + 1) WHERE playlist_id = ? AND id >= ? AND id < ?`,
-			pid, newPos, pos))
+	if after != 0 && after-before < 2 {
+		if err := r.playlistRepo.renumber(ctx, r.playlistId); err != nil {
+			return err
+		}
+		before, after, err = r.neighbors(ctx, entry.ID, position)
+		if err != nil {
+			return err
+		}
 	}
-	if err != nil {
-		return err
+	key := before + playlistSortGap
+	if after != 0 {
+		key = before + (after-before)/2
 	}
-
-	// Step 3: Flip the shifted range back to positive
-	_, err = r.executeSQL(ctx, Expr(
-		`UPDATE playlist_tracks SET id = -id WHERE playlist_id = ? AND id < 0 AND id != -999999`, pid))
-	if err != nil {
-		return err
-	}
-
-	// Step 4: Place the source track at its new position
-	_, err = r.executeSQL(ctx, Expr(
-		`UPDATE playlist_tracks SET id = ? WHERE playlist_id = ? AND id = -999999`, newPos, pid))
+	_, err = r.executeSQL(ctx, Update("playlist_tracks").Set("sort_key", key).Where(Eq{"playlist_id": r.playlistId, "id": entryID}))
 	return err
 }
 

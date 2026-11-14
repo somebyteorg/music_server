@@ -135,12 +135,7 @@ func (mf MediaFile) ContentType() string {
 }
 
 func (mf MediaFile) CoverArtID() ArtworkID {
-	// If it has a cover art, return it (if feature is disabled, skip)
-	if mf.HasCoverArt && conf.Server.EnableMediaFileCoverArt {
-		return artworkIDFromMediaFile(mf)
-	}
-	// Otherwise fallback to disc (if available) or album cover
-	return mf.DiscCoverArtID()
+	return artworkIDFromMediaFile(mf)
 }
 
 // DiscCoverArtID returns the disc artwork ID when the media file has a disc number,
@@ -159,6 +154,9 @@ func (mf MediaFile) AlbumCoverArtID() ArtworkID {
 }
 
 func (mf MediaFile) StructuredLyrics() (LyricList, error) {
+	if strings.HasPrefix(strings.TrimSpace(mf.Lyrics), "{") {
+		return parseLyricVersions(mf.Lyrics)
+	}
 	var lyrics LyricList
 	err := json.Unmarshal([]byte(mf.Lyrics), &lyrics)
 	if err != nil {

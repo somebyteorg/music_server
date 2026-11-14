@@ -35,7 +35,6 @@ vi.mock('../dialogs/Dialogs', () => ({
   Dialogs: () => <div />,
 }))
 vi.mock('../dialogs', () => ({
-  AboutDialog: () => <div />,
   QuickConnectDialog: () => <div />,
 }))
 
@@ -86,7 +85,6 @@ describe('<AppBar />', () => {
       </Provider>,
     )
     expect(screen.queryAllByText('menu.quickConnect.name')).toHaveLength(0)
-    expect(screen.queryAllByText('menu.about')).not.toHaveLength(0)
   })
 
   it('uses the resource label for settings items when set', () => {

@@ -203,7 +203,17 @@ func reorderItem(pls playlists.Playlists) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		err = pls.ReorderTrack(ctx, playlistId, id, newPos)
+		repo, lookupErr := pls.Tracks(ctx, playlistId)
+		if lookupErr != nil {
+			writePlaylistError(w, lookupErr, http.StatusBadRequest)
+			return
+		}
+		target, lookupErr := repo.Read(ctx, strconv.Itoa(newPos))
+		if lookupErr != nil {
+			writePlaylistError(w, lookupErr, http.StatusBadRequest)
+			return
+		}
+		err = pls.ReorderTrack(ctx, playlistId, id, target.Position)
 		if err != nil {
 			writePlaylistError(w, err, http.StatusBadRequest)
 			return

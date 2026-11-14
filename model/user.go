@@ -10,6 +10,7 @@ import (
 type User struct {
 	ID           string     `structs:"id" json:"id"`
 	UserName     string     `structs:"user_name" json:"userName"`
+	CanDownload  bool       `structs:"is_can_down" db:"is_can_down" json:"canDownload"`
 	Name         string     `structs:"name" json:"name"`
 	Email        string     `structs:"email" json:"email"`
 	IsAdmin      bool       `structs:"is_admin" json:"isAdmin"`
@@ -22,8 +23,10 @@ type User struct {
 
 	// Library associations (many-to-many relationship)
 	Libraries Libraries `structs:"-" json:"libraries,omitempty"`
+	// Background jobs operate across libraries independently of a user's selection.
+	AllLibraries bool `structs:"-" json:"-"`
 
-	// This is only available on the backend, and it is never sent over the wire
+	// Plaintext credential used for Subsonic token verification; never serialized.
 	Password string `structs:"-" json:"-"`
 	// Bumped on password change to invalidate every issued token for this user.
 	TokenEpoch int `structs:"-" json:"-"`
@@ -35,8 +38,8 @@ type User struct {
 }
 
 func (u User) HasLibraryAccess(libraryID int) bool {
-	if u.IsAdmin {
-		return true // Admin users have access to all libraries
+	if u.HasAllLibraryAccess() {
+		return true // Background tasks have no personal library selection.
 	}
 	for _, lib := range u.Libraries {
 		if lib.ID == libraryID {
@@ -44,6 +47,10 @@ func (u User) HasLibraryAccess(libraryID int) bool {
 		}
 	}
 	return false
+}
+
+func (u User) HasAllLibraryAccess() bool {
+	return u.IsAdmin && (u.ID == "" || u.AllLibraries)
 }
 
 type Users []User
@@ -60,8 +67,11 @@ type UserRepository interface {
 	FindFirstAdmin(ctx context.Context) (*User, error)
 	// FindByUsername must be case-insensitive
 	FindByUsername(ctx context.Context, username string) (*User, error)
-	// FindByUsernameWithPassword is the same as above, but also returns the decrypted password
+	// FindByUsernameWithPassword includes the stored plaintext credential for local verification.
 	FindByUsernameWithPassword(ctx context.Context, username string) (*User, error)
+	// SyncEmosUser uses the external identity as the user ID and preserves existing admin rights.
+	// Nil download and password values preserve the corresponding existing fields.
+	SyncEmosUser(ctx context.Context, emosID, username string, canDownload *bool, password *string) (*User, error)
 
 	// Library association methods
 	GetUserLibraries(ctx context.Context, userID string) (Libraries, error)

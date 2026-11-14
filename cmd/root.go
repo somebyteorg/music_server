@@ -12,10 +12,8 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/navidrome/navidrome/conf"
 	"github.com/navidrome/navidrome/consts"
-	"github.com/navidrome/navidrome/core/artwork"
 	"github.com/navidrome/navidrome/db"
 	"github.com/navidrome/navidrome/log"
-	"github.com/navidrome/navidrome/model"
 	"github.com/navidrome/navidrome/resources"
 	"github.com/navidrome/navidrome/scanner"
 	"github.com/navidrome/navidrome/scheduler"
@@ -83,9 +81,9 @@ func postRun() {
 func runNavidrome(parentCtx context.Context) error {
 	defer db.Init(parentCtx)()
 
+	// Music library updates are handled by the community web application.
 	g, ctx := errgroup.WithContext(parentCtx)
 	g.Go(startServer(ctx))
-	g.Go(startSignaller(ctx))
 	g.Go(startScheduler(ctx))
 	g.Go(startPlaybackServer(ctx))
 	g.Go(startJellyfinDiscovery(ctx))
@@ -93,16 +91,6 @@ func runNavidrome(parentCtx context.Context) error {
 	g.Go(startInsightsCollector(ctx))
 	g.Go(scheduleDBAnalyzer(ctx))
 	g.Go(startPluginManager(ctx))
-	artworkWorker := CreateArtworkWorker()
-	g.Go(startArtworkWorker(ctx, artworkWorker))
-	g.Go(scheduleArtworkHousekeeping(ctx, artworkWorker))
-	g.Go(runInitialScan(ctx))
-	if conf.Server.Scanner.Enabled {
-		g.Go(startScanWatcher(ctx))
-		g.Go(schedulePeriodicScan(ctx))
-	} else {
-		log.Warn(ctx, "Automatic Scanning is DISABLED")
-	}
 
 	// Errors caused by a normal shutdown are not failures
 	if err := g.Wait(); err != nil && parentCtx.Err() == nil {
@@ -162,110 +150,6 @@ func profilerHandler() http.Handler {
 	// A trailing or root slash would make StripPrefix drop the leading slash chi needs.
 	basePath := strings.TrimRight(conf.Server.BasePath, "/")
 	return http.StripPrefix(basePath, middleware.Profiler())
-}
-
-// schedulePeriodicScan schedules a periodic scan of the music library, if configured.
-func schedulePeriodicScan(ctx context.Context) func() error {
-	return func() error {
-		schedule := conf.Server.Scanner.Schedule
-		if schedule == "" {
-			log.Info(ctx, "Periodic scan is DISABLED")
-			return nil
-		}
-
-		s := CreateScanner(ctx)
-		schedulerInstance := scheduler.GetInstance()
-
-		log.Info("Scheduling periodic scan", "schedule", schedule)
-		_, err := schedulerInstance.Add(schedule, func() {
-			_, err := s.ScanAll(ctx, false)
-			if err != nil {
-				log.Error(ctx, "Error executing periodic scan", err)
-			}
-		})
-		if err != nil {
-			log.Error(ctx, "Error scheduling periodic scan", err)
-		}
-		return nil
-	}
-}
-
-// librariesWithChangedPID returns the names of the libraries whose effective PID config differs from
-// the one used by their last finished scan
-func librariesWithChangedPID(ctx context.Context, ds model.DataStore) ([]string, error) {
-	libs, err := ds.Library().GetAll(ctx)
-	if err != nil {
-		return nil, err
-	}
-	var names []string
-	for _, lib := range libs {
-		if lib.PIDChanged() {
-			names = append(names, lib.Name)
-		}
-	}
-	return names, nil
-}
-
-// runInitialScan runs an initial scan of the music library if needed.
-func runInitialScan(ctx context.Context) func() error {
-	return func() error {
-		ds := CreateDataStore()
-		fullScanRequired, err := ds.Property().DefaultGet(ctx, consts.FullScanAfterMigrationFlagKey, "0")
-		if err != nil {
-			return err
-		}
-		inProgress, err := ds.Library().ScanInProgress(ctx)
-		if err != nil {
-			return err
-		}
-		pidChangedLibs, err := librariesWithChangedPID(ctx, ds)
-		if err != nil {
-			return err
-		}
-		scanOnStartup := conf.Server.Scanner.Enabled && conf.Server.Scanner.ScanOnStartup
-		scanNeeded := scanOnStartup || inProgress || fullScanRequired == "1" || len(pidChangedLibs) > 0
-		time.Sleep(2 * time.Second) // Wait 2 seconds before the initial scan
-		if scanNeeded {
-			s := CreateScanner(ctx)
-			switch {
-			case fullScanRequired == "1":
-				log.Warn(ctx, "Full scan required after migration")
-				_ = ds.Property().Delete(ctx, consts.FullScanAfterMigrationFlagKey)
-			case len(pidChangedLibs) > 0:
-				// Includes never-scanned libraries. The scanner rescans in full only the ones that need it
-				log.Warn(ctx, "Libraries with a new or changed PID config, scanning", "libraries", pidChangedLibs)
-			case inProgress:
-				log.Warn(ctx, "Resuming interrupted scan")
-			default:
-				log.Info("Executing initial scan")
-			}
-
-			_, err = s.ScanAll(ctx, fullScanRequired == "1")
-			if err != nil {
-				log.Error(ctx, "Scan failed", err)
-			} else {
-				log.Info(ctx, "Scan completed")
-			}
-		} else {
-			log.Debug(ctx, "Initial scan not needed")
-		}
-		return nil
-	}
-}
-
-func startScanWatcher(ctx context.Context) func() error {
-	return func() error {
-		if conf.Server.Scanner.WatcherWait == 0 {
-			log.Debug("Folder watcher is DISABLED")
-			return nil
-		}
-		w := CreateScanWatcher(ctx)
-		err := w.Run(ctx)
-		if err != nil {
-			log.Error("Error starting watcher", err)
-		}
-		return nil
-	}
 }
 
 func schedulePeriodicBackup(ctx context.Context) func() error {
@@ -381,60 +265,6 @@ func startPlaybackServer(ctx context.Context) func() error {
 	}
 }
 
-// startArtworkWorker starts the background artwork acquisition worker. It always
-// runs; the queue is simply empty until something enqueues work into it.
-func startArtworkWorker(ctx context.Context, worker *artwork.Worker) func() error {
-	return func() error {
-		log.Info(ctx, "Starting artwork worker")
-		// The scanner writes to the DB for its whole run; competing for the write lock makes both fail.
-		worker.PauseWhile(scanner.IsScanning)
-		return worker.Run(ctx)
-	}
-}
-
-// outsideScan runs a DB maintenance job unless a scan is running, and keeps a scan from starting
-// until it ends; both write to the DB, and competing for the lock can make either fail.
-func outsideScan(ctx context.Context, job string, run func(context.Context) error) {
-	release, ok := scanner.LockForMaintenance()
-	if !ok {
-		log.Debug(ctx, "Skipping "+job+" because a scan is in progress")
-		return
-	}
-	defer release()
-	if err := run(ctx); err != nil {
-		log.Error(ctx, "Error running "+job, err)
-	}
-}
-
-// scheduleArtworkHousekeeping registers the recurring missing-state and prune jobs, and
-// reports an artwork config change without acting on it.
-func scheduleArtworkHousekeeping(ctx context.Context, worker *artwork.Worker) func() error {
-	return func() error {
-		schedulerInstance := scheduler.GetInstance()
-
-		if _, err := schedulerInstance.Add(consts.ArtworkEnqueueMissingSchedule, func() {
-			outsideScan(ctx, "artwork missing-state recheck", worker.EnqueueMissingAll)
-		}); err != nil {
-			log.Error(ctx, "Error scheduling artwork missing-state recheck", err)
-		}
-
-		if _, err := schedulerInstance.Add(consts.ArtworkPruneSchedule, func() {
-			outsideScan(ctx, "artwork prune", worker.RunPrune)
-		}); err != nil {
-			log.Error(ctx, "Error scheduling artwork prune", err)
-		}
-
-		// Also run the missing-row recheck once at startup so a never-scanned entity is picked up
-		// immediately, not only on the next hourly tick (e.g. after enabling the feature).
-		outsideScan(ctx, "artwork missing-state recheck", worker.EnqueueMissingAll)
-
-		if err := worker.ReconcileConfig(ctx); err != nil {
-			log.Error(ctx, "Error checking the artwork config fingerprint", err)
-		}
-		return nil
-	}
-}
-
 // startPluginManager starts the plugin manager, if configured.
 func startPluginManager(ctx context.Context) func() error {
 	return func() error {
@@ -476,7 +306,6 @@ func init() {
 	rootCmd.Flags().String("tlskey", viper.GetString("tlskey"), "optional path to a TLS key file (enables HTTPS listening)")
 
 	rootCmd.Flags().Duration("sessiontimeout", viper.GetDuration("sessiontimeout"), "how long Navidrome will wait before closing web ui idle sessions")
-	rootCmd.Flags().Duration("scaninterval", viper.GetDuration("scaninterval"), "how frequently to scan for changes in your music library")
 	rootCmd.Flags().String("uiloginbackgroundurl", viper.GetString("uiloginbackgroundurl"), "URL to a backaground image used in the Login page")
 	rootCmd.Flags().Bool("enabletranscodingconfig", viper.GetBool("enabletranscodingconfig"), "enables transcoding configuration in the UI")
 	rootCmd.Flags().Bool("enabletranscodingcancellation", viper.GetBool("enabletranscodingcancellation"), "enables transcoding context cancellation")
@@ -496,7 +325,6 @@ func init() {
 	_ = viper.BindPFlag("baseurl", rootCmd.Flags().Lookup("baseurl"))
 
 	_ = viper.BindPFlag("sessiontimeout", rootCmd.Flags().Lookup("sessiontimeout"))
-	_ = viper.BindPFlag("scaninterval", rootCmd.Flags().Lookup("scaninterval"))
 	_ = viper.BindPFlag("uiloginbackgroundurl", rootCmd.Flags().Lookup("uiloginbackgroundurl"))
 
 	_ = viper.BindPFlag("prometheus.enabled", rootCmd.Flags().Lookup("prometheus.enabled"))

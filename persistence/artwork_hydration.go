@@ -2,32 +2,54 @@ package persistence
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"iter"
+	"slices"
 
-	"github.com/navidrome/navidrome/conf"
+	. "github.com/Masterminds/squirrel"
 	"github.com/navidrome/navidrome/log"
 	"github.com/navidrome/navidrome/model"
 	"github.com/pocketbase/dbx"
 )
 
-// hydrateItemImages returns per-item artwork info in one batched query per kind. On error it logs
-// and returns an empty map, so the page still renders.
+// Cover availability comes from API-managed source paths and URLs, without thumbnail state.
 func hydrateItemImages(ctx context.Context, db dbx.Builder, kind model.Kind, ids []string) map[string]model.ItemArtworkInfo {
-	if len(ids) == 0 {
-		return map[string]model.ItemArtworkInfo{}
-	}
-	infos, err := NewArtworkRepository(db).GetInfoForItems(ctx, kind, ids)
-	if err != nil {
-		log.Error(ctx, "Failed to hydrate artwork info onto page", "kind", kind, err)
-		return map[string]model.ItemArtworkInfo{}
+	infos := make(map[string]model.ItemArtworkInfo, len(ids))
+	repo := sqlRepository{db: db, tableName: "music_cover"}
+	for chunk := range slices.Chunk(ids, artworkBatchSize) {
+		var rows []struct {
+			ID   string
+			Path string
+			URL  string
+		}
+		query := Select("id", "path", "url").From("music_cover").Where(Eq{"id": chunk})
+		if err := repo.queryAll(ctx, query, &rows); err != nil {
+			log.Error(ctx, "Failed to hydrate source cover info", "kind", kind, err)
+			return map[string]model.ItemArtworkInfo{}
+		}
+		for _, row := range rows {
+			source := row.Path
+			if source == "" {
+				source = row.URL
+			}
+			if source == "" {
+				infos[row.ID] = model.ItemArtworkInfo{ItemID: row.ID}
+				continue
+			}
+			// Tags identify the stored source; no image bytes are read.
+			digest := sha256.Sum256([]byte(source))
+			infos[row.ID] = model.ItemArtworkInfo{ItemID: row.ID, Hash: hex.EncodeToString(digest[:8])}
+		}
 	}
 	return infos
 }
 
-// applyItemImage copies a hydration entry onto img; a missing entry leaves it zero (unresolved).
 func applyItemImage(infos map[string]model.ItemArtworkInfo, id string, img *model.ItemImage) {
 	if info, ok := infos[id]; ok {
 		*img = info.Image()
+	} else {
+		*img = model.ItemImage{ImageAbsent: true}
 	}
 }
 
@@ -46,48 +68,23 @@ func hydrateItems[T any](ctx context.Context, db dbx.Builder, kind model.Kind, i
 	}
 }
 
-// hydrateMediaFileArtwork mirrors MediaFile.CoverArtID: an embedded-eligible file with resolved own
-// art uses it, else it falls back to the album's.
+// API has already resolved track and album cover sources, including fallback artwork.
 func hydrateMediaFileArtwork(ctx context.Context, db dbx.Builder, mfs model.MediaFiles) {
 	if len(mfs) == 0 {
 		return
 	}
 	albumIDs := make([]string, len(mfs))
-	var eligibleIDs []string
+	mediaIDs := make([]string, len(mfs))
 	for i := range mfs {
 		albumIDs[i] = mfs[i].AlbumID
-		if mfs[i].HasCoverArt && conf.Server.EnableMediaFileCoverArt {
-			eligibleIDs = append(eligibleIDs, mfs[i].ID)
-		}
+		mediaIDs[i] = mfs[i].ID
 	}
 	albumInfos := hydrateItemImages(ctx, db, model.KindAlbumArtwork, albumIDs)
-	mfInfos := hydrateItemImages(ctx, db, model.KindMediaFileArtwork, eligibleIDs)
+	mfInfos := hydrateItemImages(ctx, db, model.KindMediaFileArtwork, mediaIDs)
 	for i := range mfs {
 		mf := &mfs[i]
 		applyItemImage(albumInfos, mf.AlbumID, &mf.AlbumImage)
-		eligible := mf.HasCoverArt && conf.Server.EnableMediaFileCoverArt
-		ownInfo, ownResolved := mfInfos[mf.ID]
-		if eligible && ownResolved && !ownInfo.Absent() {
-			mf.ItemImage = ownInfo.Image()
-			continue
-		}
-		ownWontResolve := !eligible || (ownResolved && ownInfo.Absent())
-		// Inherit the album hash only when serving returns those exact bytes: a multi-disc track is
-		// served disc art, and an eligible-but-unresolved one still extracts its own embedded image.
-		if album, ok := albumInfos[mf.AlbumID]; ok && !album.Absent() {
-			if mf.DiscNumber == 0 && ownWontResolve {
-				mf.ItemImage = album.Image()
-			}
-			continue
-		}
-		// Mark absent only when serving would definitively yield a placeholder; disc art and
-		// still-extractable embedded art both keep a track requestable.
-		if mf.DiscNumber > 0 {
-			continue
-		}
-		if album, ok := albumInfos[mf.AlbumID]; ok && album.Absent() && ownWontResolve {
-			mf.ImageAbsent = true
-		}
+		applyItemImage(mfInfos, mf.ID, &mf.ItemImage)
 	}
 }
 

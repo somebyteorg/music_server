@@ -3,7 +3,6 @@ import {
   Datagrid,
   TextField,
   FunctionField,
-  ReferenceField,
   Filter,
   SearchInput,
   NullableBooleanInput,
@@ -32,23 +31,12 @@ const PlayerList = ({ permissions, ...props }) => {
         <SimpleList
           primaryText={(r) => r.name}
           secondaryText={(r) => r.userName}
-          tertiaryText={(r) => (
-            <>
-              {r.hasApiKey && <FaKey />} {r.maxBitRate ? r.maxBitRate : '-'}
-            </>
-          )}
+          tertiaryText={(r) => (r.hasApiKey ? <FaKey /> : null)}
         />
       ) : (
         <Datagrid rowClick="edit">
           <TextField source="name" />
           {permissions === 'admin' && <TextField source="userName" />}
-          <ReferenceField source="transcodingId" reference="transcoding">
-            <TextField source="name" />
-          </ReferenceField>
-          <FunctionField
-            source="maxBitRate"
-            render={(r) => (r.maxBitRate ? r.maxBitRate : '-')}
-          />
           <FunctionField
             source="hasApiKey"
             sortable={false}

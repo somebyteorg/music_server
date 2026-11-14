@@ -1,53 +1,53 @@
 import { jwtDecode } from 'jwt-decode'
 import { baseUrl } from './utils'
-import config from './config'
+import config, { shareInfo } from './config'
 
-// config sent from server may contain authentication info, for example when the user is authenticated
-// by a reverse proxy request header
-if (config.auth) {
-  try {
-    storeAuthenticationInfo(config.auth)
-  } catch (e) {
-    // eslint-disable-next-line no-console
-    console.log(e)
-  }
-}
+const downloadsEnabled = config.enableDownloads
+config.enableDownloads =
+  downloadsEnabled &&
+  (!localStorage.getItem('is-authenticated') ||
+    Boolean(shareInfo) ||
+    localStorage.getItem('canDownload') === 'true')
 
 function storeAuthenticationInfo(authInfo) {
   authInfo.token && localStorage.setItem('token', authInfo.token)
   localStorage.setItem('userId', authInfo.id)
   localStorage.setItem('name', authInfo.name)
   localStorage.setItem('username', authInfo.username)
-  authInfo.avatar && localStorage.setItem('avatar', authInfo.avatar)
+  if (authInfo.avatar) localStorage.setItem('avatar', authInfo.avatar)
+  else localStorage.removeItem('avatar')
   localStorage.setItem('role', authInfo.isAdmin ? 'admin' : 'regular')
-  localStorage.setItem('subsonic-salt', authInfo.subsonicSalt)
-  localStorage.setItem('subsonic-token', authInfo.subsonicToken)
+  localStorage.setItem('canDownload', String(authInfo.canDownload === true))
+  config.enableDownloads = downloadsEnabled && authInfo.canDownload === true
   localStorage.setItem('is-authenticated', 'true')
 }
 
 const authProvider = {
-  login: ({ username, password }) => {
-    let url = baseUrl('/auth/login')
-    if (config.firstTime) {
-      url = baseUrl('/auth/createAdmin')
-    }
+  login: ({ username, password, token }) => {
+    if (token !== undefined) removeItems()
+    const url = baseUrl(token !== undefined ? '/auth/emos' : '/auth/login')
     const request = new Request(url, {
       method: 'POST',
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify(
+        token !== undefined ? { token } : { username, password },
+      ),
       headers: new Headers({ 'Content-Type': 'application/json' }),
     })
     return fetch(request)
-      .then((response) => {
+      .then(async (response) => {
         if (response.status < 200 || response.status >= 300) {
-          throw new Error(response.statusText)
+          const body = await response.json().catch(() => ({}))
+          const error = new Error(
+            body.error || body.message || response.statusText,
+          )
+          error.status = response.status
+          throw error
         }
         return response.json()
       })
       .then((response) => {
         jwtDecode(response.token) // Validate token
         storeAuthenticationInfo(response)
-        // Avoid "going to create admin" dialog after logout/login without a refresh
-        config.firstTime = false
         return response
       })
       .catch((error) => {
@@ -58,17 +58,12 @@ const authProvider = {
           throw new Error('errors.network_error')
         }
 
-        throw new Error(error)
+        throw error
       })
   },
 
   logout: () => {
     removeItems()
-    // Only proxy-authenticated sessions go to the IdP; others (e.g. direct LAN access) get the login form
-    if (config.extAuthLogoutURL && config.auth) {
-      window.location.href = config.extAuthLogoutURL
-      return Promise.resolve(false)
-    }
     return Promise.resolve()
   },
 
@@ -100,6 +95,7 @@ const authProvider = {
 }
 
 const removeItems = () => {
+  config.enableDownloads = downloadsEnabled
   localStorage.removeItem('token')
   localStorage.removeItem('userId')
   localStorage.removeItem('name')
@@ -109,6 +105,7 @@ const removeItems = () => {
   localStorage.removeItem('subsonic-salt')
   localStorage.removeItem('subsonic-token')
   localStorage.removeItem('is-authenticated')
+  localStorage.removeItem('canDownload')
 }
 
 export default authProvider

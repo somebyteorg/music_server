@@ -135,18 +135,6 @@ func CreatePrometheus() metrics.Metrics {
 	))
 }
 
-func CreateScanner(ctx context.Context) model.Scanner {
-	panic(wire.Build(
-		allProviders,
-	))
-}
-
-func CreateScanWatcher(ctx context.Context) scanner.Watcher {
-	panic(wire.Build(
-		allProviders,
-	))
-}
-
 func GetPlaybackServer() playback.PlaybackServer {
 	panic(wire.Build(
 		allProviders,

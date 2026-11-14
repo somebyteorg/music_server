@@ -55,20 +55,7 @@ func (s *controller) getScanner() scanner {
 // If targets is empty, it scans all libraries.
 // This is meant to be called from the command line (see cmd/scan.go).
 func CallScan(ctx context.Context, ds model.DataStore, pls playlists.Playlists, fullScan bool, targets []model.ScanTarget) (<-chan *ProgressInfo, error) {
-	release, err := lockScan(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer release()
-
-	ctx = auth.WithAdminUser(ctx, ds)
-	progress := make(chan *ProgressInfo, 100)
-	go func() {
-		defer close(progress)
-		scanner := &scannerImpl{ds: ds, pls: pls}
-		scanner.scanFolders(ctx, fullScan, targets, progress)
-	}()
-	return progress, nil
+	return nil, fmt.Errorf("音乐库由跃律共建网页维护，扫描已关闭")
 }
 
 func IsScanning() bool {
@@ -202,6 +189,10 @@ func (s *controller) ScanAll(requestCtx context.Context, fullScan bool) ([]strin
 }
 
 func (s *controller) ScanFolders(requestCtx context.Context, fullScan bool, targets []model.ScanTarget) ([]string, error) {
+	return nil, fmt.Errorf("音乐库由跃律共建网页维护，扫描已关闭")
+}
+
+func (s *controller) scanFoldersInternal(requestCtx context.Context, fullScan bool, targets []model.ScanTarget) ([]string, error) {
 	release, err := lockScan(requestCtx)
 	if err != nil {
 		return nil, err

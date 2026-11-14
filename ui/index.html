@@ -1,41 +1,56 @@
-<!DOCTYPE html>
-<html lang="en">
+<!doctype html>
+<html lang="zh-Hans">
   <head>
     <meta charset="utf-8" />
-    <meta
-            name="description"
-            content="Navidrome Music Server - {{.Version}}"
+    <meta name="description" content="Navidrome Music Server" />
+    <link
+      rel="apple-touch-icon"
+      sizes="180x180"
+      href="%BASE_URL%apple-touch-icon.png"
     />
-    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
-    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
-    <link rel="icon" type="image/png" sizes="192x192" href="/android-chrome-192x192.png">
-    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
-    <link rel="mask-icon" href="/safari-pinned-tab.svg" color="#5b5fd5">
-    <meta name="msapplication-TileColor" content="#da532c">
-    <meta name="theme-color" content="#ffffff">
+    <link
+      rel="icon"
+      type="image/png"
+      sizes="32x32"
+      href="%BASE_URL%favicon-32x32.png"
+    />
+    <link
+      rel="icon"
+      type="image/png"
+      sizes="192x192"
+      href="%BASE_URL%android-chrome-192x192.png"
+    />
+    <link
+      rel="icon"
+      type="image/png"
+      sizes="16x16"
+      href="%BASE_URL%favicon-16x16.png"
+    />
+    <link
+      rel="mask-icon"
+      href="%BASE_URL%safari-pinned-tab.svg"
+      color="#5b5fd5"
+    />
+    <meta name="msapplication-config" content="%BASE_URL%browserconfig.xml" />
+    <meta name="msapplication-TileColor" content="#da532c" />
+    <meta name="theme-color" content="#ffffff" />
 
+    <meta name="referrer" content="no-referrer" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <!--
       manifest.webmanifest provides metadata used when your web app is installed on a
       user's mobile device or desktop. See https://developers.google.com/web/fundamentals/web-app-manifest/
     -->
-    <link rel="manifest" href="./manifest.webmanifest" />
-    <meta property="og:site_name" content="Navidrome">
-    <meta property="og:url" content="{{ .ShareURL }}">
-    <meta property="og:title" content="{{ .ShareDescription }}">
-    <meta property="og:image" content="{{ .ShareImageURL }}">
-    <meta property="og:image:width" content="300">
-    <meta property="og:image:height" content="300">
+    <!-- The PWA plugin injects the manifest link using the application base path. -->
+    <meta property="og:site_name" content="Navidrome" />
+    <meta property="og:title" content="Navidrome" />
+    <meta property="og:image" content="%BASE_URL%android-chrome-512x512.png" />
+    <meta property="og:image:width" content="300" />
+    <meta property="og:image:height" content="300" />
     <title>Navidrome</title>
     <script>
       // Shim for libraries that check for Node.js process object
-      window.process = { env: {} };
-    </script>
-    <script>
-      window.__APP_CONFIG__ = {{ .AppConfig }}
-    </script>
-    <script>
-      window.__SHARE_INFO__ = {{ .ShareInfo }}
+      window.process = { env: {} }
     </script>
   </head>
   <body>
@@ -52,5 +67,5 @@
       To create a production bundle, use `npm run build` or `yarn build`.
     -->
   </body>
-  <script type="module" src="/src/index.jsx"></script>
+  <script type="module" src="./src/index.jsx"></script>
 </html>

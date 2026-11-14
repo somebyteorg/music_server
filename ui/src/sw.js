@@ -3,10 +3,11 @@
 import { createNavigationHandler } from './swNavigation'
 
 // documentation: https://developers.google.com/web/tools/workbox/modules/workbox-sw
-importScripts('3rdparty/workbox/workbox-sw.js')
+const appBasePath = import.meta.env.BASE_URL
+importScripts(`${appBasePath}3rdparty/workbox/workbox-sw.js`)
 
 workbox.setConfig({
-  modulePathPrefix: '3rdparty/workbox/',
+  modulePathPrefix: `${appBasePath}3rdparty/workbox/`,
   debug: false,
 })
 
@@ -25,10 +26,8 @@ addEventListener('message', (event) => {
   }
 })
 
-const CACHE_NAME = 'offline-html'
-// This assumes /offline.html is a URL for your self-contained
-// (no external images or styles) offline page.
-const FALLBACK_HTML_URL = './offline.html'
+const CACHE_NAME = 'navidrome-offline-html'
+const FALLBACK_HTML_URL = `${appBasePath}offline.html`
 // Populate the cache with the offline HTML page when the
 // service worker is installed.
 self.addEventListener('install', async (event) => {

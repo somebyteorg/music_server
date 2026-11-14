@@ -1,8 +1,5 @@
 export const isWritable = (ownerId) => {
-  return (
-    localStorage.getItem('userId') === ownerId ||
-    localStorage.getItem('role') === 'admin'
-  )
+  return localStorage.getItem('userId') === ownerId
 }
 
 export const isReadOnly = (ownerId) => {
@@ -12,4 +9,4 @@ export const isReadOnly = (ownerId) => {
 export const isSmartPlaylist = (pls) => !!pls.rules
 
 export const canChangeTracks = (pls) =>
-  isWritable(pls.ownerId) && !isSmartPlaylist(pls) && !pls.sync
+  pls.canEditTracks && !isSmartPlaylist(pls) && !pls.sync

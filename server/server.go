@@ -24,13 +24,11 @@ import (
 	"github.com/navidrome/navidrome/log"
 	"github.com/navidrome/navidrome/model"
 	"github.com/navidrome/navidrome/server/events"
-	"github.com/navidrome/navidrome/ui"
 )
 
 type Server struct {
 	router   chi.Router
 	ds       model.DataStore
-	appRoot  string
 	broker   events.Broker
 	insights metrics.Insights
 }
@@ -41,7 +39,7 @@ func New(ds model.DataStore, broker events.Broker, insights metrics.Insights) *S
 	auth.Init(s.ds)
 	s.initRoutes()
 	s.mountAuthenticationRoutes()
-	s.mountRootRedirector()
+	s.router.Get(path.Join(conf.Server.BasePath, "/ui-config"), uiConfig)
 	checkFFmpegInstallation()
 	checkExternalCredentials()
 	return s
@@ -57,9 +55,6 @@ func (s *Server) MountRouter(description, urlPath string, subRouter http.Handler
 
 // Run starts the server with the given address, and if specified, with TLS enabled.
 func (s *Server) Run(ctx context.Context, addr string, port int, tlsCert string, tlsKey string) error {
-	// Mount the router for the frontend assets
-	s.MountRouter("WebUI", consts.URLPathUI, s.frontendAssetsHandler())
-
 	// Create a new http.Server with the specified read header timeout and handler
 	server := &http.Server{
 		ReadHeaderTimeout: consts.ServerReadHeaderTimeout,
@@ -164,8 +159,6 @@ func createUnixSocketFile(socketPath string, socketPerm string) (net.Listener, e
 }
 
 func (s *Server) initRoutes() {
-	s.appRoot = path.Join(conf.Server.BasePath, consts.URLPathUI)
-
 	r := chi.NewRouter()
 
 	defaultMiddlewares := chi.Middlewares{
@@ -175,7 +168,6 @@ func (s *Server) initRoutes() {
 		realIPMiddleware,
 		middleware.Recoverer,
 		middleware.Heartbeat("/ping"),
-		robotsTXT(ui.BuildAssets()),
 		serverAddressMiddleware,
 		clientUniqueIDMiddleware,
 		compressMiddleware(),
@@ -211,33 +203,15 @@ func (s *Server) mountAuthenticationRoutes() chi.Router {
 
 			rateLimiter := ClientIPRateLimiter(conf.Server.AuthRequestLimit, conf.Server.AuthWindowLength)
 			r.With(rateLimiter).Post("/login", login(s.ds))
+			r.With(rateLimiter).Post("/emos", emosTokenLogin(s.ds))
 		} else {
 			log.Warn("Login rate limit is disabled! Consider enabling it to be protected against brute-force attacks")
 
 			r.Post("/login", login(s.ds))
+			r.Post("/emos", emosTokenLogin(s.ds))
 		}
 		r.Post("/createAdmin", createAdmin(s.ds))
 	})
-}
-
-// Serve UI app assets
-func (s *Server) mountRootRedirector() {
-	r := s.router
-	// Redirect root to UI URL
-	r.Get("/*", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, s.appRoot+"/", http.StatusFound)
-	})
-	r.Get(s.appRoot, func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, s.appRoot+"/", http.StatusFound)
-	})
-}
-
-func (s *Server) frontendAssetsHandler() http.Handler {
-	r := chi.NewRouter()
-
-	r.Handle("/", Index(s.ds, ui.BuildAssets()))
-	r.Handle("/*", http.StripPrefix(s.appRoot, http.FileServer(http.FS(ui.BuildAssets()))))
-	return r
 }
 
 // validateTLSCertificates validates the TLS certificate and key files before starting the server.

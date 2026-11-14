@@ -39,7 +39,15 @@ func requestLogger(next http.Handler) http.Handler {
 		next.ServeHTTP(ww, r)
 		status := ww.Status()
 
-		message := fmt.Sprintf("HTTP: %s %s://%s%s", r.Method, scheme, r.Host, r.RequestURI)
+		loggedURL := *r.URL
+		query := loggedURL.Query()
+		for _, field := range []string{"token", "emos_token", "jwt", "p", "t", "apiKey"} {
+			if query.Has(field) {
+				query.Set(field, "[redacted]")
+			}
+		}
+		loggedURL.RawQuery = query.Encode()
+		message := fmt.Sprintf("HTTP: %s %s://%s%s", r.Method, scheme, r.Host, loggedURL.RequestURI())
 		logArgs := []any{
 			r.Context(),
 			message,

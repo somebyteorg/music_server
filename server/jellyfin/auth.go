@@ -7,6 +7,7 @@ import (
 	"github.com/navidrome/navidrome/core/auth"
 	"github.com/navidrome/navidrome/log"
 	"github.com/navidrome/navidrome/model"
+	"github.com/navidrome/navidrome/server"
 	"github.com/navidrome/navidrome/server/jellyfin/dto"
 )
 
@@ -23,9 +24,8 @@ func (api *Router) authenticateByName(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Navidrome stores recoverable passwords; this mirrors Subsonic's validateCredentials plaintext path.
-	usr, err := api.ds.User().FindByUsernameWithPassword(ctx, body.Username)
-	if body.Pw == "" || err != nil || usr == nil || usr.Password != body.Pw {
+	usr, err := auth.AuthenticateEmos(ctx, api.ds, body.Username, body.Pw, server.ClientIP(r), r.UserAgent())
+	if err != nil {
 		log.Warn(ctx, "Jellyfin API: invalid login", "username", body.Username, "remoteAddr", r.RemoteAddr)
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
@@ -91,15 +91,15 @@ func userPolicy(u *model.User) *dto.UserPolicy {
 		EnableLiveTvManagement:           false,
 		EnableLiveTvAccess:               false,
 		EnableMediaPlayback:              true,
-		EnableAudioPlaybackTranscoding:   true,
-		EnableVideoPlaybackTranscoding:   true,
-		EnablePlaybackRemuxing:           true,
+		EnableAudioPlaybackTranscoding:   false,
+		EnableVideoPlaybackTranscoding:   false,
+		EnablePlaybackRemuxing:           false,
 		ForceRemoteSourceTranscoding:     false,
 		EnableContentDeletion:            false,
 		EnableContentDeletionFromFolders: []string{},
-		EnableContentDownloading:         true,
-		EnableSyncTranscoding:            true,
-		EnableMediaConversion:            true,
+		EnableContentDownloading:         u.CanDownload,
+		EnableSyncTranscoding:            false,
+		EnableMediaConversion:            false,
 		EnabledDevices:                   []string{},
 		EnableAllDevices:                 true,
 		EnabledChannels:                  []string{},

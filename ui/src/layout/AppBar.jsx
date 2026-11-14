@@ -6,19 +6,13 @@ import {
   usePermissions,
   getResources,
 } from 'react-admin'
-import {
-  MdInfo,
-  MdPerson,
-  MdPhonelink,
-  MdSupervisorAccount,
-} from 'react-icons/md'
+import { MdPerson, MdPhonelink, MdSupervisorAccount } from 'react-icons/md'
 import { useSelector } from 'react-redux'
 import { makeStyles, MenuItem, ListItemIcon, Divider } from '@material-ui/core'
 import ViewListIcon from '@material-ui/icons/ViewList'
 import { Dialogs } from '../dialogs/Dialogs'
-import { AboutDialog, QuickConnectDialog } from '../dialogs'
+import { QuickConnectDialog } from '../dialogs'
 import PersonalMenu from './PersonalMenu'
-import ActivityPanel from './ActivityPanel'
 import NowPlayingPanel from './NowPlayingPanel'
 import UserMenu from './UserMenu'
 import config from '../config'
@@ -131,7 +125,6 @@ const CustomUserMenu = ({ onClick, ...rest }) => {
       {config.devActivityPanel &&
         permissions === 'admin' &&
         config.enableNowPlaying && <NowPlayingPanel />}
-      {config.devActivityPanel && permissions === 'admin' && <ActivityPanel />}
       <UserMenu {...rest}>
         <PersonalMenu sidebarIsOpen={true} onClick={onClick} />
         {config.enableQuickConnect && (
@@ -147,11 +140,6 @@ const CustomUserMenu = ({ onClick, ...rest }) => {
           .filter(settingsResources)
           .map((r) => renderSettingsMenuItemLink(r))}
         <Divider />
-        <DialogMenuItem
-          label={translate('menu.about')}
-          icon={MdInfo}
-          dialog={AboutDialog}
-        />
       </UserMenu>
       <Dialogs />
     </>

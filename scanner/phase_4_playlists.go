@@ -61,6 +61,7 @@ func (p *phasePlaylists) produce(put func(entry *model.Folder)) error {
 	if noAdmin {
 		return p.deferImport()
 	}
+	admin.AllLibraries = true
 	p.ctx = request.WithUser(p.ctx, *admin)
 
 	// When recovering a deferred import, scan all playlist folders, not just touched ones.

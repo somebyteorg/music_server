@@ -67,7 +67,7 @@ type ItemArtwork struct {
 	UpdatedAt   time.Time `structs:"updated_at"`
 }
 
-// ItemArtworkInfo is the list-hydration projection (item_artwork joined with artwork).
+// ItemArtworkInfo is the per-item image projection used when hydrating lists.
 type ItemArtworkInfo struct {
 	ItemID        string
 	Hash          string

@@ -9,16 +9,12 @@ import {
   Tooltip,
   Card,
   CardContent,
-  CardActions,
   Divider,
   Box,
   Typography,
 } from '@material-ui/core'
 import { FiActivity } from 'react-icons/fi'
 import { BiError, BiMessageError } from 'react-icons/bi'
-import { VscSync } from 'react-icons/vsc'
-import { GiMagnifyingGlass } from 'react-icons/gi'
-import subsonic from '../subsonic'
 import { useInitialScanStatus } from './useInitialScanStatus'
 import { useInterval } from '../common'
 import { useScanElapsedTime } from './useScanElapsedTime'
@@ -97,7 +93,6 @@ const ActivityPanel = () => {
   const handleMenuClose = () => {
     setAnchorEl(null)
   }
-  const triggerScan = (full) => () => subsonic.startScan({ fullScan: full })
 
   useEffect(() => {
     if (serverStart.version && serverStart.version !== config.version) {
@@ -211,25 +206,6 @@ const ActivityPanel = () => {
               </Box>
             )}
           </CardContent>
-          <Divider />
-          <CardActions>
-            <Tooltip title={translate('activity.quickScan')}>
-              <IconButton
-                onClick={triggerScan(false)}
-                disabled={scanStatus.scanning}
-              >
-                <VscSync />
-              </IconButton>
-            </Tooltip>
-            <Tooltip title={translate('activity.fullScan')}>
-              <IconButton
-                onClick={triggerScan(true)}
-                disabled={scanStatus.scanning}
-              >
-                <GiMagnifyingGlass />
-              </IconButton>
-            </Tooltip>
-          </CardActions>
         </Card>
       </Popover>
     </div>

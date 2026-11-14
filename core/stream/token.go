@@ -129,13 +129,5 @@ func (s *deciderService) ResolveRequestFromToken(ctx context.Context, token stri
 		return Request{}, ErrTokenStale
 	}
 
-	req := Request{Offset: offset}
-	if !p.DirectPlay && p.TargetFormat != "" {
-		req.Format = p.TargetFormat
-		req.BitRate = p.TargetBitrate
-		req.SampleRate = p.TargetSampleRate
-		req.BitDepth = p.TargetBitDepth
-		req.Channels = p.TargetChannels
-	}
-	return req, nil
+	return Request{Format: "raw"}, nil
 }

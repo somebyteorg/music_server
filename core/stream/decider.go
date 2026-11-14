@@ -39,85 +39,12 @@ type deciderService struct {
 }
 
 func (s *deciderService) MakeDecision(ctx context.Context, mf *model.MediaFile, clientInfo *ClientInfo, opts TranscodeOptions) (*TranscodeDecision, error) {
-	decision := &TranscodeDecision{
-		MediaID:         mf.ID,
-		SourceUpdatedAt: mf.UpdatedAt,
+	selected, err := CommunityMedia(ctx, mf)
+	if err != nil {
+		return nil, err
 	}
+	return &TranscodeDecision{MediaID: mf.ID, SourceUpdatedAt: mf.UpdatedAt, CanDirectPlay: true, SourceStream: buildSourceStream(selected, nil)}, nil
 
-	var probe *ffmpeg.AudioProbeResult
-	if !opts.SkipProbe {
-		if !s.ff.IsProbeAvailable() {
-			log.Debug(ctx, "ffprobe not available, using tag metadata for transcode decision", "mediaID", mf.ID)
-		} else {
-			var err error
-			probe, err = s.ensureProbed(ctx, mf)
-			if err != nil {
-				return nil, err
-			}
-		}
-	}
-
-	// Build source stream details (uses probe data if available)
-	decision.SourceStream = buildSourceStream(mf, probe)
-	src := &decision.SourceStream
-
-	log.Trace(ctx, "Making transcode decision", "mediaID", mf.ID, "container", src.Container,
-		"codec", src.Codec, "bitrate", src.Bitrate, "channels", src.Channels,
-		"sampleRate", src.SampleRate, "lossless", src.IsLossless, "client", clientInfo.Name)
-
-	// Check global bitrate constraint first.
-	if clientInfo.MaxAudioBitrate > 0 && src.Bitrate > clientInfo.MaxAudioBitrate {
-		log.Trace(ctx, "Global bitrate constraint exceeded, skipping direct play",
-			"sourceBitrate", src.Bitrate, "maxAudioBitrate", clientInfo.MaxAudioBitrate)
-		decision.TranscodeReasons = append(decision.TranscodeReasons, "audio bitrate not supported")
-		// Skip direct play profiles entirely — global constraint fails
-	} else {
-		// Try direct play profiles, collecting reasons for each failure
-		for _, profile := range clientInfo.DirectPlayProfiles {
-			if reason := s.checkDirectPlayProfile(src, &profile, clientInfo); reason == "" {
-				decision.CanDirectPlay = true
-				decision.TranscodeReasons = nil // Clear any previously collected reasons
-				break
-			} else {
-				decision.TranscodeReasons = append(decision.TranscodeReasons, reason)
-			}
-		}
-	}
-
-	// If direct play is possible, we're done
-	if decision.CanDirectPlay {
-		log.Debug(ctx, "Transcode decision: direct play", "mediaID", mf.ID, "container", src.Container, "codec", src.Codec)
-		return decision, nil
-	}
-
-	// Try transcoding profiles (in order of preference)
-	for _, profile := range clientInfo.TranscodingProfiles {
-		if ts, transcodeFormat := s.computeTranscodedStream(ctx, src, &profile, clientInfo); ts != nil {
-			decision.CanTranscode = true
-			decision.TargetFormat = transcodeFormat
-			decision.TargetBitrate = ts.Bitrate
-			decision.TargetChannels = ts.Channels
-			decision.TargetSampleRate = ts.SampleRate
-			decision.TargetBitDepth = ts.BitDepth
-			decision.TranscodeStream = ts
-			break
-		}
-	}
-
-	if decision.CanTranscode {
-		log.Debug(ctx, "Transcode decision: transcode", "mediaID", mf.ID,
-			"targetFormat", decision.TargetFormat, "targetBitrate", decision.TargetBitrate,
-			"targetChannels", decision.TargetChannels, "reasons", decision.TranscodeReasons)
-	}
-
-	// If neither direct play nor transcode is possible
-	if !decision.CanDirectPlay && !decision.CanTranscode {
-		decision.ErrorReason = "no compatible playback profile found"
-		log.Warn(ctx, "Transcode decision: no compatible profile", "mediaID", mf.ID,
-			"container", src.Container, "codec", src.Codec, "reasons", decision.TranscodeReasons)
-	}
-
-	return decision, nil
 }
 
 func buildSourceStream(mf *model.MediaFile, probe *ffmpeg.AudioProbeResult) Details {

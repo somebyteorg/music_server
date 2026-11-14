@@ -46,6 +46,7 @@ func (r *libraryRepository) Put(ctx context.Context, l *model.Library, colsToUpd
 }
 
 func (r *libraryRepository) putLibrary(ctx context.Context, l *model.Library, colsToUpdate ...string) error {
+	l.DefaultNewUsers = l.ID == model.DefaultLibraryID
 	if l.ID == model.DefaultLibraryID {
 		currentLib, err := r.Get(ctx, 1)
 		// if we are creating it, it's ok.
@@ -73,6 +74,7 @@ func (r *libraryRepository) putLibrary(ctx context.Context, l *model.Library, co
 			"pid_track":         l.PIDTrack,
 		}, colsToUpdate...)
 		cols["updated_at"] = l.UpdatedAt
+		cols["default_new_users"] = l.DefaultNewUsers
 		sq := Update(r.tableName).SetMap(cols).Where(Eq{"id": l.ID})
 		rowsAffected, updateErr := r.executeSQL(ctx, sq)
 		if updateErr != nil {
@@ -88,19 +90,6 @@ func (r *libraryRepository) putLibrary(ctx context.Context, l *model.Library, co
 	}
 	if err != nil {
 		return err
-	}
-
-	// Auto-assign all libraries to all admin users
-	sql := Expr(`
-INSERT INTO user_library (user_id, library_id)
-SELECT u.id, l.id
-FROM app_user u
-CROSS JOIN library l
-WHERE u.is_admin = true
-ON CONFLICT (user_id, library_id) DO NOTHING;`,
-	)
-	if _, err = r.executeSQL(ctx, sql); err != nil {
-		return fmt.Errorf("failed to assign library to admin users: %w", err)
 	}
 
 	return nil

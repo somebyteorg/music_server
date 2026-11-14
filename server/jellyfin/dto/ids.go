@@ -2,7 +2,9 @@ package dto
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/hex"
+	"math"
 	"strconv"
 	"strings"
 
@@ -50,14 +52,18 @@ func EncodeLibraryID(libID int) string {
 	return encodeReserved(kindLibrary, libID)
 }
 
-// EncodePlaylistEntryID renders a playlist entry's position (model.PlaylistTrack.ID, an integer
-// column) in the reserved GUID space. Clients echo it back to remove one occurrence of a song.
+// EncodePlaylistEntryID preserves a stable 64-bit entry id in a distinct GUID namespace.
+var playlistEntryPrefix = [8]byte{0, 0, 0, 0, 0, 0, 0, kindPlaylistEntry}
+
 func EncodePlaylistEntryID(entryID string) string {
-	n, err := strconv.Atoi(entryID)
-	if err != nil {
+	n, err := strconv.ParseUint(entryID, 10, 63)
+	if err != nil || n == 0 {
 		return ""
 	}
-	return encodeReserved(kindPlaylistEntry, n)
+	var b [16]byte
+	copy(b[:8], playlistEntryPrefix[:])
+	binary.BigEndian.PutUint64(b[8:], n)
+	return hex.EncodeToString(b[:])
 }
 
 func encodeReserved(kind byte, payload int) string {
@@ -79,6 +85,9 @@ func encodeReserved(kind byte, payload int) string {
 func DecodeID(guid string) (string, bool) {
 	b, ok := decodeGUID(guid)
 	if !ok {
+		return "", false
+	}
+	if bytes.Equal(b[:8], playlistEntryPrefix[:]) {
 		return "", false
 	}
 	kind, payload, reserved := reservedFields(b)
@@ -108,17 +117,17 @@ func DecodeIDs(guids []string) ([]string, bool) {
 	return out, true
 }
 
-// DecodePlaylistEntryID decodes a playlist entry GUID to its position. It rejects every other kind,
-// so an entity id can't be taken for a playlist_tracks row.
+// DecodePlaylistEntryID accepts only stable playlist entry ids.
 func DecodePlaylistEntryID(guid string) (string, bool) {
 	b, ok := decodeGUID(guid)
-	if !ok {
+	if !ok || !bytes.Equal(b[:8], playlistEntryPrefix[:]) {
 		return "", false
 	}
-	if kind, payload, reserved := reservedFields(b); reserved && kind == kindPlaylistEntry {
-		return strconv.Itoa(payload), true
+	n := binary.BigEndian.Uint64(b[8:])
+	if n == 0 || n > math.MaxInt64 {
+		return "", false
 	}
-	return "", false
+	return strconv.FormatUint(n, 10), true
 }
 
 func decodeGUID(guid string) ([16]byte, bool) {

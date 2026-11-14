@@ -2,6 +2,8 @@ import polyglotI18nProvider from 'ra-i18n-polyglot'
 import deepmerge from 'deepmerge'
 import dataProvider from '../dataProvider'
 import en from './en.json'
+import zhHans from './zh-Hans.json'
+import config from '../config'
 import { i18nProvider } from './index'
 
 // Only returns current selected locale if its translations are found in localStorage
@@ -15,7 +17,7 @@ const defaultLocale = function () {
     })
     return locale
   }
-  return 'en'
+  return config.defaultLanguage || 'zh-Hans'
 }
 
 export function retrieveTranslation(locale) {
@@ -56,6 +58,9 @@ export default polyglotI18nProvider((locale) => {
   // English is bundled
   if (locale === 'en') {
     return prepareLanguage(en)
+  }
+  if (locale === 'zh-Hans') {
+    return prepareLanguage(zhHans)
   }
   // If the requested locale is in already loaded, return it
   const current = JSON.parse(localStorage.getItem('translation'))

@@ -165,6 +165,7 @@ func WithAdminUser(ctx context.Context, ds model.DataStore) context.Context {
 		u = &model.User{IsAdmin: true, UserName: "admin"}
 	}
 
+	u.AllLibraries = true
 	ctx = request.WithUsername(ctx, u.UserName)
 	return request.WithUser(ctx, *u)
 }

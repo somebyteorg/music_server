@@ -5,9 +5,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 
+	"github.com/Masterminds/squirrel"
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/deluan/rest"
 	"github.com/navidrome/navidrome/conf"
@@ -135,17 +135,17 @@ func (s *playlists) Create(ctx context.Context, playlistId string, name string, 
 				return err
 			}
 			// Ownership first: a non-owner must get ErrNotAuthorized, not a read-only conflict.
-			if !usr.IsAdmin && pls.OwnerID != usr.ID {
+			if !pls.CanEditTracks {
 				return model.ErrNotAuthorized
 			}
 			if !pls.TracksEditable() {
 				return model.ErrPlaylistNotEditable
 			}
 		} else {
-			pls = &model.Playlist{Name: name}
+			pls = &model.Playlist{Name: name, Public: true}
 			pls.OwnerID = usr.ID
 		}
-		pls.Tracks = nil
+		pls.Tracks = make(model.PlaylistTracks, 0, len(ids))
 		pls.AddMediaFilesByID(ids)
 
 		err = tx.Playlist().Put(ctx, pls)
@@ -174,27 +174,38 @@ func (s *playlists) Delete(ctx context.Context, id string) error {
 func (s *playlists) Update(ctx context.Context, playlistID string,
 	name *string, comment *string, public *bool,
 	idsToAdd []string, idxToRemove []int) error {
-	var pls *model.Playlist
-	var err error
-	hasTrackChanges := len(idsToAdd) > 0 || len(idxToRemove) > 0
-	if hasTrackChanges {
-		pls, err = s.checkTracksEditable(ctx, playlistID)
-	} else {
-		pls, err = s.checkWritable(ctx, playlistID)
-	}
+	pls, err := s.ds.Playlist().Get(ctx, playlistID)
 	if err != nil {
 		return err
+	}
+	if (name != nil && *name != pls.Name || comment != nil && *comment != pls.Comment || public != nil && *public != pls.Public) && !pls.CanEdit {
+		return model.ErrNotAuthorized
+	}
+	if len(idsToAdd) > 0 || len(idxToRemove) > 0 {
+		if !pls.CanEditTracks {
+			return model.ErrNotAuthorized
+		}
+		if !pls.TracksEditable() {
+			return model.ErrPlaylistNotEditable
+		}
 	}
 	return s.ds.WithTx(ctx, func(tx model.DataStore) error {
 		repo := tx.Playlist()
 
 		if len(idxToRemove) > 0 {
 			tracksRepo := repo.Tracks(ctx, playlistID, false)
-			// Convert 0-based indices to 1-based position IDs and delete them directly,
-			// avoiding the need to load all tracks into memory.
-			positions := make([]string, len(idxToRemove))
-			for i, idx := range idxToRemove {
-				positions[i] = strconv.Itoa(idx + 1)
+			positions := make([]string, 0, len(idxToRemove))
+			for _, index := range idxToRemove {
+				if index < 0 {
+					continue
+				}
+				tracks, err := tracksRepo.GetAll(ctx, model.QueryOptions{Sort: "id", Offset: index, Max: 1, Filters: squirrel.Eq{"missing": false}})
+				if err != nil {
+					return err
+				}
+				if len(tracks) != 0 {
+					positions = append(positions, tracks[0].ID)
+				}
 			}
 			if err := tracksRepo.Delete(ctx, positions...); err != nil {
 				return err
@@ -224,33 +235,38 @@ func (s *playlists) Update(ctx context.Context, playlistID string,
 
 // checkWritable fetches the playlist and verifies the current user can modify it.
 func (s *playlists) checkWritable(ctx context.Context, id string) (*model.Playlist, error) {
-	pls, err := s.ds.Playlist().Get(ctx, id)
+	playlist, err := s.ds.Playlist().Get(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	usr, _ := request.UserFrom(ctx)
-	if !usr.IsAdmin && pls.OwnerID != usr.ID {
+	if !playlist.CanEdit {
 		return nil, model.ErrNotAuthorized
 	}
-	return pls, nil
+	return playlist, nil
 }
 
-// checkTracksEditable verifies the user owns the playlist and its tracks are editable.
-func (s *playlists) checkTracksEditable(ctx context.Context, playlistID string) (*model.Playlist, error) {
-	pls, err := s.checkWritable(ctx, playlistID)
+func (s *playlists) checkTracksEditable(ctx context.Context, id string) (*model.Playlist, error) {
+	playlist, err := s.ds.Playlist().Get(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	if !pls.TracksEditable() {
+	if !playlist.CanEditTracks {
+		return nil, model.ErrNotAuthorized
+	}
+	if !playlist.TracksEditable() {
 		return nil, model.ErrPlaylistNotEditable
 	}
-	return pls, nil
+	return playlist, nil
 }
 
 // updateMetadata applies optional metadata changes to a playlist and persists it.
 // Accepts a DataStore parameter so it can be used inside transactions.
 // The caller is responsible for permission checks.
 func (s *playlists) updateMetadata(ctx context.Context, ds model.DataStore, pls *model.Playlist, name *string, comment *string, public *bool) error {
+	if (name == nil || *name == pls.Name) && (comment == nil || *comment == pls.Comment) && (public == nil || *public == pls.Public) {
+		return nil
+	}
+
 	if name != nil {
 		pls.Name = *name
 	}
@@ -341,6 +357,7 @@ func (s *playlists) SetImage(ctx context.Context, playlistID string, reader io.R
 	}
 
 	pls.UploadedImage = filename
+	pls.CoverID = nil
 	if err := s.ds.Playlist().Put(ctx, pls); err != nil {
 		return err
 	}
@@ -359,6 +376,7 @@ func (s *playlists) RemoveImage(ctx context.Context, playlistID string) error {
 	}
 
 	pls.UploadedImage = ""
+	pls.CoverID = nil
 	if err := s.ds.Playlist().Put(ctx, pls); err != nil {
 		return err
 	}

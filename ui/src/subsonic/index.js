@@ -7,16 +7,14 @@ import {
 
 const url = (command, id, options) => {
   const username = localStorage.getItem('username')
-  const token = localStorage.getItem('subsonic-token')
-  const salt = localStorage.getItem('subsonic-salt')
-  if (!username || !token || !salt) {
+  const token = localStorage.getItem('token')
+  if (!username || !token) {
     return ''
   }
 
   const params = new URLSearchParams()
   params.append('u', username)
-  params.append('t', token)
-  params.append('s', salt)
+  params.append('jwt', token)
   params.append('f', 'json')
   params.append('v', '1.8.0')
   params.append('c', 'NavidromeUI')
@@ -65,8 +63,6 @@ const setRating = (id, rating) => httpClient(url('setRating', id, { rating }))
 
 const download = (id, format = 'raw', bitrate = '0') =>
   (window.location.href = baseUrl(url('download', id, { format, bitrate })))
-
-const startScan = (options) => httpClient(url('startScan', null, options))
 
 const getScanStatus = () => httpClient(url('getScanStatus'))
 
@@ -136,6 +132,7 @@ const streamUrl = (id, options) => {
     url('stream', id, {
       ts: true,
       ...options,
+      format: 'raw',
     }),
   )
 }
@@ -149,7 +146,6 @@ export default {
   star,
   unstar,
   setRating,
-  startScan,
   getScanStatus,
   getNowPlaying,
   getCoverArtUrl,

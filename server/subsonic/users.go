@@ -20,7 +20,7 @@ func buildUserResponse(user model.User) responses.User {
 		Email:             user.Email,
 		StreamRole:        true,
 		ScrobblingEnabled: true,
-		DownloadRole:      conf.Server.EnableDownloads,
+		DownloadRole:      conf.Server.EnableDownloads && user.CanDownload,
 		ShareRole:         conf.Server.EnableSharing,
 		CoverArtRole:      conf.Server.EnableArtworkUpload || user.IsAdmin,
 		Folder:            slice.Map(user.Libraries, func(lib model.Library) int32 { return int32(lib.ID) }),

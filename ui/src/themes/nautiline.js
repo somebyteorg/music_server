@@ -8,7 +8,7 @@
 // ============================================
 
 const ACCENT_COLOR = '#009688' // Material teal
-const UNBOUNDED_FONT_PATH = 'fonts/Unbounded-Variable.woff2'
+const UNBOUNDED_FONT_PATH = `${import.meta.env.BASE_URL}fonts/Unbounded-Variable.woff2`
 
 // ============================================
 // DESIGN TOKENS

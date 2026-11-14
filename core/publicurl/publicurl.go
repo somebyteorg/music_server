@@ -83,3 +83,16 @@ func AbsoluteURL(ctx context.Context, u string, params url.Values) string {
 	}
 	return buildUrl.String()
 }
+
+// WebURL points to the standalone UI on the same public host as the API.
+func WebURL(ctx context.Context, params url.Values) string {
+	base, err := url.Parse(PublicURL(ctx, "/", nil))
+	if err != nil {
+		log.Error(ctx, "Could not build web URL", err)
+		base = &url.URL{}
+	}
+	base.Path = consts.URLPathUI + "/"
+	base.RawQuery = params.Encode()
+	base.Fragment = ""
+	return base.String()
+}

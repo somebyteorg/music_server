@@ -3,8 +3,6 @@ package server
 import (
 	"context"
 	"crypto/md5"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -49,17 +47,15 @@ func login(ds model.DataStore) func(w http.ResponseWriter, r *http.Request) {
 }
 
 func doLogin(ds model.DataStore, username string, password string, w http.ResponseWriter, r *http.Request) {
-	user, err := validateLogin(r.Context(), ds.User(), username, password)
+	user, err := auth.AuthenticateEmos(r.Context(), ds, username, password, ClientIP(r), r.UserAgent())
 	if err != nil {
-		_ = rest.RespondWithError(w, http.StatusInternalServerError, "Unknown error authentication user. Please try again")
+		respondLoginError(w, r, err)
 		return
 	}
-	if user == nil {
-		log.Warn(r, "Unsuccessful login", "username", username, "request", r.Header)
-		_ = rest.RespondWithError(w, http.StatusUnauthorized, "Invalid username or password")
-		return
-	}
+	respondLogin(w, r, user)
+}
 
+func respondLogin(w http.ResponseWriter, r *http.Request, user *model.User) {
 	tokenString, err := auth.CreateToken(user)
 	if err != nil {
 		_ = rest.RespondWithError(w, http.StatusInternalServerError, "Unknown error authenticating user. Please try again")
@@ -70,28 +66,51 @@ func doLogin(ds model.DataStore, username string, password string, w http.Respon
 	_ = rest.RespondWithJSON(w, http.StatusOK, payload)
 }
 
+func respondLoginError(w http.ResponseWriter, r *http.Request, err error) {
+	var emosErr *auth.EmosError
+	if errors.As(err, &emosErr) {
+		_ = rest.RespondWithError(w, emosErr.Status, emosErr.Message)
+		return
+	}
+	log.Error(r, "Could not load EMOS account", err)
+	_ = rest.RespondWithError(w, http.StatusInternalServerError, "无法读取用户信息，请稍后重试")
+}
+
+func emosTokenLogin(ds model.DataStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var data struct {
+			Token string `json:"token"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+			_ = rest.RespondWithError(w, http.StatusBadRequest, "缺少登录凭证")
+			return
+		}
+		user, err := auth.AuthenticateEmosToken(r.Context(), ds, data.Token)
+		if err != nil {
+			respondLoginError(w, r, err)
+			return
+		}
+		respondLogin(w, r, user)
+	}
+}
+
 func buildAuthPayload(user *model.User) map[string]any {
 	payload := map[string]any{
-		"id":       user.ID,
-		"name":     user.Name,
-		"username": user.UserName,
-		"isAdmin":  user.IsAdmin,
+		"id":          user.ID,
+		"name":        user.Name,
+		"username":    user.UserName,
+		"isAdmin":     user.IsAdmin,
+		"canDownload": user.CanDownload,
+	}
+	// Native clients such as Feishin use these credentials for Subsonic requests.
+	if user.Password != "" {
+		salt := id.NewRandom()
+		payload["subsonicSalt"] = salt
+		payload["subsonicToken"] = fmt.Sprintf("%x", md5.Sum([]byte(user.Password+salt)))
 	}
 	if conf.Server.EnableGravatar && user.Email != "" {
 		payload["avatar"] = gravatar.Url(user.Email, 50)
 	}
-
-	bytes := make([]byte, 3)
-	_, err := rand.Read(bytes)
-	if err != nil {
-		log.Error("Could not create subsonic salt", "user", user.UserName, err)
-		return payload
-	}
-	subsonicSalt := hex.EncodeToString(bytes)
-	payload["subsonicSalt"] = subsonicSalt
-
-	subsonicToken := md5.Sum([]byte(user.Password + subsonicSalt))
-	payload["subsonicToken"] = hex.EncodeToString(subsonicToken[:])
 
 	return payload
 }
@@ -121,27 +140,7 @@ func getCredentialsFromBody(r *http.Request) (username string, password string, 
 
 func createAdmin(ds model.DataStore) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
-		username, password, err := getCredentialsFromBody(r)
-		if err != nil {
-			log.Error(r, "parsing request body", err)
-			_ = rest.RespondWithError(w, http.StatusUnprocessableEntity, err.Error())
-			return
-		}
-		c, err := ds.User().CountAll(r.Context())
-		if err != nil {
-			_ = rest.RespondWithError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		if c > 0 {
-			_ = rest.RespondWithError(w, http.StatusForbidden, "Cannot create another first admin")
-			return
-		}
-		err = createAdminUser(r.Context(), ds, username, password)
-		if err != nil {
-			_ = rest.RespondWithError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		doLogin(ds, username, password, w, r)
+		_ = rest.RespondWithError(w, http.StatusForbidden, "请使用 EMOS 账号登录")
 	}
 }
 
@@ -163,24 +162,6 @@ func createAdminUser(ctx context.Context, ds model.DataStore, username, password
 		return fmt.Errorf("creating initial user: %w", err)
 	}
 	return nil
-}
-
-func validateLogin(ctx context.Context, userRepo model.UserRepository, userName, password string) (*model.User, error) {
-	u, err := userRepo.FindByUsernameWithPassword(ctx, userName)
-	if errors.Is(err, model.ErrNotFound) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	if u.Password != password {
-		return nil, nil
-	}
-	err = userRepo.UpdateLastLoginAt(ctx, u.ID)
-	if err != nil {
-		log.Error(ctx, "Could not update LastLoginAt", "user", userName)
-	}
-	return u, nil
 }
 
 func JWTVerifier(next http.Handler) http.Handler {
@@ -366,53 +347,6 @@ func JWTRefresher(next http.Handler) http.Handler {
 		next.ServeHTTP(rw, r.WithContext(ctx))
 		rw.setToken()
 	})
-}
-
-func handleLoginFromHeaders(ds model.DataStore, r *http.Request) map[string]any {
-	username := UsernameFromConfig(r)
-	if username == "" {
-		username = UsernameFromExtAuthHeader(r)
-		if username == "" {
-			return nil
-		}
-	}
-
-	ctx := r.Context()
-	userRepo := ds.User()
-	user, err := userRepo.FindByUsernameWithPassword(ctx, username)
-	if user == nil || err != nil {
-		log.Info(r, "User passed in header not found", "user", username)
-		// Check if this is the first user being created
-		count, _ := userRepo.CountAll(ctx)
-		isFirstUser := count == 0
-
-		newUser := model.User{
-			ID:          id.NewRandom(),
-			UserName:    username,
-			Name:        username,
-			Email:       "",
-			NewPassword: consts.PasswordAutogenPrefix + id.NewRandom(),
-			IsAdmin:     isFirstUser, // Make the first user an admin
-		}
-		err := userRepo.Put(ctx, &newUser)
-		if err != nil {
-			log.Error(r, "Could not create new user", "user", username, err)
-			return nil
-		}
-		user, err = userRepo.FindByUsernameWithPassword(ctx, username)
-		if user == nil || err != nil {
-			log.Error(r, "Created user but failed to fetch it", "user", username)
-			return nil
-		}
-	}
-
-	err = userRepo.UpdateLastLoginAt(ctx, user.ID)
-	if err != nil {
-		log.Error(r, "Could not update LastLoginAt", "user", username, err)
-		return nil
-	}
-
-	return buildAuthPayload(user)
 }
 
 func validateIPAgainstList(ip string, comaSeparatedList string) bool {

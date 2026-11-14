@@ -48,10 +48,16 @@ type archiver struct {
 }
 
 func (a *archiver) ZipAlbum(ctx context.Context, id string, format string, bitrate int, out io.Writer) error {
+	format = "raw"
+	bitrate = 0
+
 	return a.zipAlbums(ctx, id, format, bitrate, out, squirrel.Eq{"album_id": id}, model.ArtworkID{})
 }
 
 func (a *archiver) ZipArtist(ctx context.Context, id string, format string, bitrate int, out io.Writer) error {
+	format = "raw"
+	bitrate = 0
+
 	// Match by album-artist participation, not the deprecated album_artist_id
 	// column (first album artist only), so co-album-artists are included too.
 	filter := squirrel.And{
@@ -191,6 +197,9 @@ func (a *archiver) ZipShare(ctx context.Context, s *model.Share, out io.Writer) 
 }
 
 func (a *archiver) ZipPlaylist(ctx context.Context, id string, format string, bitrate int, out io.Writer) error {
+	format = "raw"
+	bitrate = 0
+
 	pls, err := a.ds.Playlist().GetWithTracks(ctx, id, true, false)
 	if err != nil {
 		log.Error(ctx, "Error loading mediafiles from playlist", "id", id, err)
@@ -255,13 +264,16 @@ func (a *archiver) playlistFilename(mf model.MediaFile, format string, idx int) 
 }
 
 func (a *archiver) resolveRequest(ctx context.Context, mf *model.MediaFile, format string, bitrate int) stream.Request {
-	if format == "" || format == "raw" {
-		return stream.Request{Format: "raw"}
-	}
-	return a.decider.ResolveRequest(ctx, mf, format, bitrate, 0)
+	return stream.Request{Format: "raw"}
 }
 
 func (a *archiver) addFileToZip(ctx context.Context, z *zip.Writer, mf model.MediaFile, req stream.Request, filename string) error {
+	selected, selectionErr := stream.CommunityMedia(ctx, &mf)
+	if selectionErr != nil {
+		return selectionErr
+	}
+	mf = *selected
+	req = stream.Request{Format: "raw"}
 	path := mf.AbsolutePath()
 
 	// Open the source before writing the zip entry header so a rejection

@@ -6,7 +6,6 @@ import Button from '@material-ui/core/Button'
 import Card from '@material-ui/core/Card'
 import CardActions from '@material-ui/core/CardActions'
 import CircularProgress from '@material-ui/core/CircularProgress'
-import Link from '@material-ui/core/Link'
 import TextField from '@material-ui/core/TextField'
 import { ThemeProvider, makeStyles } from '@material-ui/core/styles'
 import {
@@ -22,7 +21,6 @@ import Notification from './Notification'
 import useCurrentTheme from '../themes/useCurrentTheme'
 import config from '../config'
 import { clearQueue } from '../actions'
-import { INSIGHTS_DOC_URL } from '../consts.js'
 
 const useStyles = makeStyles(
   (theme) => ({
@@ -74,7 +72,44 @@ const useStyles = makeStyles(
       marginTop: '1em',
     },
     actions: {
-      padding: '0 1em 1em 1em',
+      flexDirection: 'column',
+      alignItems: 'stretch',
+      gap: theme.spacing(1.5),
+      padding: theme.spacing(0, 2, 2.5),
+    },
+    actionButton: {
+      minHeight: 44,
+      fontSize: 14,
+      textTransform: 'none',
+    },
+    loginDivider: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: theme.spacing(1.5),
+      color: theme.palette.text.secondary,
+      fontSize: 12,
+      '&::before, &::after': {
+        content: '""',
+        flex: 1,
+        borderTop: `1px solid ${theme.palette.divider}`,
+      },
+    },
+    emosButton: {
+      color: theme.palette.text.primary,
+      borderColor: theme.palette.divider,
+      boxShadow: 'none',
+      '&:hover': {
+        borderColor: theme.palette.text.secondary,
+        backgroundColor: theme.palette.action.hover,
+        boxShadow: 'none',
+      },
+    },
+    emosIcon: {
+      display: 'block',
+      width: 20,
+      height: 20,
+      borderRadius: 4,
+      objectFit: 'contain',
     },
     button: {},
     systemNameLink: {
@@ -164,149 +199,44 @@ const FormLogin = ({ loading, handleSubmit, validate }) => {
                   />
                 </div>
               </div>
-              <CardActions className={classes.actions}>
+              <CardActions className={classes.actions} disableSpacing>
                 <Button
                   variant="contained"
                   type="submit"
                   color="primary"
                   disabled={loading}
-                  className={classes.button}
+                  className={`${classes.button} ${classes.actionButton}`}
                   fullWidth
                 >
                   {loading && <CircularProgress size={25} thickness={2} />}
                   {translate('ra.auth.sign_in')}
                 </Button>
+                {config.emosLoginURL && (
+                  <>
+                    <div className={classes.loginDivider} aria-hidden="true">
+                      或
+                    </div>
+                    <Button
+                      variant="outlined"
+                      href={config.emosLoginURL}
+                      disabled={loading}
+                      className={`${classes.actionButton} ${classes.emosButton}`}
+                      startIcon={
+                        <img
+                          src="https://files.emos.best/files/base/logo/logo_1.jpg"
+                          alt=""
+                          className={classes.emosIcon}
+                          width="20"
+                          height="20"
+                        />
+                      }
+                      fullWidth
+                    >
+                      使用 EMOS 登录
+                    </Button>
+                  </>
+                )}
               </CardActions>
-            </Card>
-            <Notification />
-          </div>
-        </form>
-      )}
-    />
-  )
-}
-
-const InsightsNotice = ({ url }) => {
-  const translate = useTranslate()
-  const classes = useStyles()
-
-  const anchorRegex = /\[(.+?)]/g
-  const originalMsg = translate('ra.auth.insightsCollectionNote')
-
-  // Split the entire message on newlines
-  const lines = originalMsg.split('\n')
-
-  const renderedLines = lines.map((line, lineIndex) => {
-    const segments = []
-    let lastIndex = 0
-    let match
-
-    // Find bracketed text in each line
-    while ((match = anchorRegex.exec(line)) !== null) {
-      // match.index is where "[something]" starts
-      // match[1] is the text inside the brackets
-      const bracketText = match[1]
-
-      // Push the text before the bracket
-      segments.push(line.slice(lastIndex, match.index))
-
-      // Push the <Link> component
-      segments.push(
-        <Link
-          href={url}
-          target="_blank"
-          rel="noopener noreferrer"
-          key={`${lineIndex}-${match.index}`}
-          style={{ cursor: 'pointer' }}
-        >
-          {bracketText}
-        </Link>,
-      )
-
-      // Update lastIndex to the character right after the bracketed text
-      lastIndex = match.index + match[0].length
-    }
-
-    // Push the remaining text after the last bracket
-    segments.push(line.slice(lastIndex))
-
-    // Return this line’s parts, plus a <br/> if not the last line
-    return (
-      <React.Fragment key={lineIndex}>
-        {segments}
-        {lineIndex < lines.length - 1 && <br />}
-      </React.Fragment>
-    )
-  })
-
-  return <div className={classes.message}>{renderedLines}</div>
-}
-
-const FormSignUp = ({ loading, handleSubmit, validate }) => {
-  const translate = useTranslate()
-  const classes = useStyles()
-
-  return (
-    <Form
-      onSubmit={handleSubmit}
-      validate={validate}
-      render={({ handleSubmit }) => (
-        <form onSubmit={handleSubmit} noValidate>
-          <div className={classes.main}>
-            <Card className={classes.card}>
-              <div className={classes.avatar}>
-                <img src={Logo} className={classes.icon} alt={'logo'} />
-              </div>
-              <div className={classes.welcome}>
-                {translate('ra.auth.welcome1')}
-              </div>
-              <div className={classes.welcome}>
-                {translate('ra.auth.welcome2')}
-              </div>
-              <div className={classes.form}>
-                <div className={classes.input}>
-                  <Field
-                    autoFocus
-                    name="username"
-                    component={renderInput}
-                    label={translate('ra.auth.username')}
-                    disabled={loading}
-                    spellCheck={false}
-                  />
-                </div>
-                <div className={classes.input}>
-                  <Field
-                    name="password"
-                    component={renderInput}
-                    label={translate('ra.auth.password')}
-                    type="password"
-                    disabled={loading}
-                  />
-                </div>
-                <div className={classes.input}>
-                  <Field
-                    name="confirmPassword"
-                    component={renderInput}
-                    label={translate('ra.auth.confirmPassword')}
-                    type="password"
-                    disabled={loading}
-                  />
-                </div>
-              </div>
-              <CardActions className={classes.actions}>
-                <Button
-                  variant="contained"
-                  type="submit"
-                  color="primary"
-                  disabled={loading}
-                  className={classes.button}
-                  fullWidth
-                >
-                  {loading && <CircularProgress size={25} thickness={2} />}
-                  {translate('ra.auth.buttonCreateAdmin')}
-                </Button>
-              </CardActions>
-              <InsightsNotice url={INSIGHTS_DOC_URL} />
             </Card>
             <Notification />
           </div>
@@ -327,19 +257,20 @@ const Login = ({ location }) => {
     (auth) => {
       setLoading(true)
       dispatch(clearQueue())
-      login(auth, location.state ? location.state.nextPathname : '/').catch(
-        (error) => {
-          setLoading(false)
-          notify(
-            typeof error === 'string'
-              ? error
-              : typeof error === 'undefined' || !error.message
-                ? 'ra.auth.sign_in_error'
-                : error.message,
-            'warning',
-          )
-        },
-      )
+      return login(
+        auth,
+        location?.state ? location.state.nextPathname : '/',
+      ).catch((error) => {
+        setLoading(false)
+        notify(
+          typeof error === 'string'
+            ? error
+            : typeof error === 'undefined' || !error.message
+              ? 'ra.auth.sign_in_error'
+              : error.message,
+          'warning',
+        )
+      })
     },
     [dispatch, login, notify, setLoading, location],
   )
@@ -347,10 +278,10 @@ const Login = ({ location }) => {
   const validateLogin = useCallback(
     (values) => {
       const errors = {}
-      if (!values.username) {
+      if (!values.username?.trim()) {
         errors.username = translate('ra.validation.required')
       }
-      if (!values.password) {
+      if (!values.password?.trim()) {
         errors.password = translate('ra.validation.required')
       }
       return errors
@@ -358,33 +289,6 @@ const Login = ({ location }) => {
     [translate],
   )
 
-  const validateSignup = useCallback(
-    (values) => {
-      const errors = validateLogin(values)
-      const regex = /^\w+$/g
-      if (values.username && !values.username.match(regex)) {
-        errors.username = translate('ra.validation.invalidChars')
-      }
-      if (!values.confirmPassword) {
-        errors.confirmPassword = translate('ra.validation.required')
-      }
-      if (values.confirmPassword !== values.password) {
-        errors.confirmPassword = translate('ra.validation.passwordDoesNotMatch')
-      }
-      return errors
-    },
-    [translate, validateLogin],
-  )
-
-  if (config.firstTime) {
-    return (
-      <FormSignUp
-        handleSubmit={handleSubmit}
-        validate={validateSignup}
-        loading={loading}
-      />
-    )
-  }
   return (
     <FormLogin
       handleSubmit={handleSubmit}

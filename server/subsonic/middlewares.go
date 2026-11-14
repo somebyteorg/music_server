@@ -152,11 +152,17 @@ func authenticate(ds model.DataStore) func(next http.Handler) http.Handler {
 					return
 				}
 
-				usr, err = ds.User().FindByUsernameWithPassword(ctx, username)
-				if err == nil {
-					err = validateCredentials(usr, pass, token, salt, jwt)
-					if errors.Is(err, model.ErrInvalidAuth) && pass != "" && jwt == "" {
+				if strings.HasPrefix(decodePassword(pass), consts.APIKeyPrefix) && jwt == "" {
+					usr, err = ds.User().FindByUsername(ctx, username)
+					if err == nil {
 						keyPlayer, err = playerFromPasswordKey(ctx, ds, usr, pass)
+					}
+				} else if pass != "" && jwt == "" {
+					usr, err = auth.AuthenticateEmos(ctx, ds, username, decodePassword(pass), server.ClientIP(r), r.UserAgent())
+				} else {
+					usr, err = ds.User().FindByUsernameWithPassword(ctx, username)
+					if err == nil {
+						err = validateCredentials(usr, pass, token, salt, jwt)
 					}
 				}
 				invalidLogin := errors.Is(err, model.ErrNotFound) || errors.Is(err, model.ErrInvalidAuth)
@@ -276,10 +282,10 @@ func validateCredentials(user *model.User, pass, token, salt, jwt string) error 
 			claims.Subject == user.UserName &&
 			auth.CheckClaims(claims, *user, auth.AudienceSubsonic) == nil
 	case pass != "":
-		valid = decodePassword(pass) == user.Password
+		valid = user.Password != "" && decodePassword(pass) == user.Password
 	case token != "":
 		t := fmt.Sprintf("%x", md5.Sum([]byte(user.Password+salt)))
-		valid = t == token
+		valid = user.Password != "" && t == token
 	}
 
 	if !valid {

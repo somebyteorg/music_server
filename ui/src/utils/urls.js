@@ -18,10 +18,9 @@ export const shareUrl = (path) => {
 }
 
 export const sharePlayerUrl = (id) => {
-  const url = new URL(
-    shareUrl(config.publicBaseUrl + '/' + id),
-    window.location.href,
-  )
+  const publicHost = new URL(config.shareURL || '', window.location.href)
+  const url = new URL(import.meta.env.BASE_URL, publicHost)
+  url.searchParams.set('share', id)
   return url.href
 }
 

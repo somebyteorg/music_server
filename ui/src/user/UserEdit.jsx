@@ -3,7 +3,6 @@ import { makeStyles } from '@material-ui/core/styles'
 import {
   TextInput,
   BooleanInput,
-  PasswordInput,
   Edit,
   required,
   email,
@@ -16,8 +15,6 @@ import {
   useRedirect,
   useRefresh,
   FormDataConsumer,
-  usePermissions,
-  useRecordContext,
 } from 'react-admin'
 import { Typography } from '@material-ui/core'
 import { ReadOnlyDateField, Title } from '../common'
@@ -44,25 +41,6 @@ const UserToolbar = ({ showDelete, ...props }) => (
     {showDelete && <DeleteUserButton />}
   </Toolbar>
 )
-
-const CurrentPasswordInput = ({ formData, isMyself, ...rest }) => {
-  const { permissions } = usePermissions()
-  return formData.changePassword && (isMyself || permissions !== 'admin') ? (
-    <PasswordInput className="ra-input" source="currentPassword" {...rest} />
-  ) : null
-}
-
-const NewPasswordInput = ({ formData, ...rest }) => {
-  const translate = useTranslate()
-  return formData.changePassword ? (
-    <PasswordInput
-      source="password"
-      className="ra-input"
-      label={translate('resources.user.fields.newPassword')}
-      {...rest}
-    />
-  ) : null
-}
 
 const UserEdit = (props) => {
   const { permissions } = props
@@ -130,26 +108,6 @@ const UserEdit = (props) => {
           {...getNameHelperText()}
         />
         <TextInput spellCheck={false} source="email" validate={[email()]} />
-        <BooleanInput source="changePassword" />
-        <FormDataConsumer>
-          {(formDataProps) => (
-            <CurrentPasswordInput
-              spellCheck={false}
-              isMyself={isMyself}
-              {...formDataProps}
-            />
-          )}
-        </FormDataConsumer>
-        <FormDataConsumer>
-          {(formDataProps) => (
-            <NewPasswordInput spellCheck={false} {...formDataProps} />
-          )}
-        </FormDataConsumer>
-
-        {permissions === 'admin' && (
-          <BooleanInput source="isAdmin" initialValue={false} />
-        )}
-
         {/* Conditional Library Selection for Admin Users Only */}
         {permissions === 'admin' && (
           <FormDataConsumer>

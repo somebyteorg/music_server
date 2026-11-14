@@ -1,48 +1,31 @@
-// Package imghttp holds the HTTP caching contract shared by the subsonic, public, and jellyfin
-// image handlers, so they apply identical headers without importing each other.
+// Package imghttp sends original images for the subsonic, public, and jellyfin handlers.
 package imghttp
 
 import (
 	"net/http"
 
 	"github.com/navidrome/navidrome/core/artwork"
-	"github.com/navidrome/navidrome/utils/req"
+	"github.com/navidrome/navidrome/core/filedelivery"
 )
 
-// WriteImageHeaders applies the artwork caching contract and reports whether a 304 was written
-// (the caller must then not write a body). requestedHash is the hash the client asserted, or "".
-func WriteImageHeaders(w http.ResponseWriter, r *http.Request, img *artwork.Image, requestedHash string) (wrote304 bool) {
+// ServeImage forwards database files or sends original bytes without caching or resizing.
+func ServeImage(w http.ResponseWriter, r *http.Request, img *artwork.Image, requestedHash string) error {
+	WriteImageHeaders(w, r, img, requestedHash)
+	if img.Path != "" {
+		return filedelivery.Redirect(w, img.Path, img.MIME)
+	}
+	data, mime, err := filedelivery.ReadImage(img)
+	if err != nil {
+		return err
+	}
+	filedelivery.ServeImage(w, r, data, mime)
+	return nil
+}
+
+// WriteImageHeaders always disables caching, including for placeholders and versioned URLs.
+func WriteImageHeaders(w http.ResponseWriter, _ *http.Request, _ *artwork.Image, _ string) bool {
 	h := w.Header()
-	// Placeholders are transient stand-ins for unresolved art: never cached, no validators.
-	if img.Placeholder {
-		h.Set("Cache-Control", "no-store")
-		return false
-	}
-
-	// The ETag versions the served representation, so a re-encoding config change invalidates a
-	// revalidating client's cache; full-size originals are their own pixel hash.
-	etag := img.ETag
-	if etag == "" {
-		etag = img.Hash
-	}
-	// An empty validator would be shared by every such response, 304ing clients that echo it back.
-	if etag != "" {
-		h.Set("ETag", `"`+etag+`"`)
-	}
-	if !img.LastUpdated.IsZero() {
-		h.Set("Last-Modified", img.LastUpdated.UTC().Format(http.TimeFormat))
-	}
-	// Immutable only when the client asked for the current pixel hash; anything else revalidates,
-	// so art that gets re-resolved is never pinned.
-	if requestedHash != "" && requestedHash == img.Hash {
-		h.Set("Cache-Control", "public, max-age=31536000, immutable")
-	} else {
-		h.Set("Cache-Control", "public, no-cache")
-	}
-
-	if etag != "" && req.IfNoneMatch(r, etag) {
-		w.WriteHeader(http.StatusNotModified)
-		return true
-	}
+	h.Del("ETag")
+	h.Del("Last-Modified")
 	return false
 }

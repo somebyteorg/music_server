@@ -2,23 +2,19 @@ package persistence
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 
 	. "github.com/Masterminds/squirrel"
 	"github.com/deluan/rest"
 	"github.com/navidrome/navidrome/conf"
 	"github.com/navidrome/navidrome/consts"
-	"github.com/navidrome/navidrome/log"
 	"github.com/navidrome/navidrome/model"
 	"github.com/navidrome/navidrome/model/criteria"
 	"github.com/navidrome/navidrome/model/id"
 	"github.com/navidrome/navidrome/model/request"
-	"github.com/navidrome/navidrome/utils"
 	"github.com/navidrome/navidrome/utils/slice"
 	"github.com/pocketbase/dbx"
 )
@@ -47,11 +43,6 @@ func (us dbUsers) toModels() model.Users {
 	return slice.Map(us, func(u dbUser) model.User { return *u.User })
 }
 
-var (
-	once   sync.Once
-	encKey []byte
-)
-
 func NewUserRepository(db dbx.Builder) model.UserRepository {
 	r := &userRepository{}
 	r.db = db
@@ -61,16 +52,17 @@ func NewUserRepository(db dbx.Builder) model.UserRepository {
 		"password": invalidFilter,
 		"name":     startsWithFilter(r.tableName + ".name"),
 	})
-	once.Do(func() {
-		_ = r.initPasswordEncryptionKey(context.Background())
-	})
 	return r
 }
 
 // selectUserWithLibraries returns a SelectBuilder that includes library information
 func (r *userRepository) selectUserWithLibraries(ctx context.Context, options ...model.QueryOptions) SelectBuilder {
 	return r.newSelect(ctx, options...).
-		Columns(`app_user.*`,
+		Columns(`app_user.id`, `app_user.user_name`, `app_user.is_can_down`,
+			`app_user.name`, `app_user.email`, `app_user.is_admin`,
+			`COALESCE(app_user.password, '') AS password`, `app_user.token_epoch`,
+			`app_user.last_login_at`, `app_user.last_access_at`, `app_user.created_at`, `app_user.updated_at`,
+			`app_user.scrobble_filter`,
 			`COALESCE(jsonb_agg(jsonb_build_object(
 				'id', library.id,
 				'name', library.name,
@@ -124,11 +116,6 @@ func (r *userRepository) putUser(ctx context.Context, u *model.User) error {
 		u.ID = id.NewRandom()
 	}
 	u.UpdatedAt = databaseNow()
-	if u.NewPassword != "" {
-		if err := r.encryptPassword(ctx, u); err != nil {
-			return err
-		}
-	}
 	values, err := toSQLArgs(*u)
 	if err != nil {
 		return fmt.Errorf("error converting user to SQL args: %w", err)
@@ -168,17 +155,8 @@ func (r *userRepository) putUser(ctx context.Context, u *model.User) error {
 		}
 	}
 
-	// Auto-assign all libraries to admin users in a single SQL operation
-	if u.IsAdmin {
-		sql := Expr(
-			"INSERT INTO user_library (user_id, library_id) SELECT ?, id FROM library ON CONFLICT DO NOTHING",
-			u.ID,
-		)
-		if _, err := r.executeSQL(ctx, sql); err != nil {
-			return fmt.Errorf("failed to assign all libraries to admin user: %w", err)
-		}
-	} else if isNewUser { // Only for new regular users
-		// Auto-assign default libraries to new regular users
+	// Initialize the selection once; later profile updates preserve it for every role.
+	if isNewUser {
 		sql := Expr(
 			"INSERT INTO user_library (user_id, library_id) SELECT ?, id FROM library WHERE default_new_users = true ON CONFLICT DO NOTHING",
 			u.ID,
@@ -218,12 +196,60 @@ func (r *userRepository) FindByUsername(ctx context.Context, username string) (*
 }
 
 func (r *userRepository) FindByUsernameWithPassword(ctx context.Context, username string) (*model.User, error) {
-	usr, err := r.FindByUsername(ctx, username)
-	if err != nil {
-		return nil, err
-	}
-	_ = r.decryptPassword(ctx, usr)
-	return usr, nil
+	return r.FindByUsername(ctx, username)
+}
+
+func (r *userRepository) SyncEmosUser(ctx context.Context, emosID, username string, canDownload *bool, password *string) (*model.User, error) {
+	var user *model.User
+	err := r.withTx(ctx, func(base sqlRepository) error {
+		scoped := *r
+		scoped.sqlRepository = base
+		// Shared with music_api so simultaneous first logins create one account.
+		if _, err := scoped.executeSQL(ctx, Expr("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))", "emos-user:"+emosID)); err != nil {
+			return err
+		}
+		var result dbUser
+		err := scoped.queryOne(ctx, scoped.selectUserWithLibraries(ctx).
+			Where(Eq{"app_user.id": emosID}), &result)
+		isNewUser := errors.Is(err, model.ErrNotFound)
+		if isNewUser {
+			user = &model.User{ID: emosID, UserName: username, Name: username}
+		} else if err != nil {
+			return err
+		} else {
+			user = result.User
+		}
+		// Quick login reuses existing account details; password login refreshes the EMOS profile.
+		if canDownload != nil {
+			user.UserName = username
+			user.CanDownload = *canDownload
+		}
+		if isNewUser {
+			if password != nil {
+				user.NewPassword = *password
+			}
+			err = scoped.putUser(ctx, user)
+		} else {
+			// Login only refreshes EMOS profile fields, preserving locally managed admin rights.
+			update := Update(scoped.tableName).Where(Eq{"id": user.ID}).Set("updated_at", databaseNow())
+			if canDownload != nil {
+				update = update.Set("user_name", username).Set("is_can_down", *canDownload)
+			}
+			if password != nil {
+				update = update.Set("password", *password)
+			}
+			_, err = scoped.executeSQL(ctx, update)
+		}
+		if err != nil {
+			return err
+		}
+		if err := scoped.UpdateLastLoginAt(ctx, user.ID); err != nil {
+			return err
+		}
+		user, err = scoped.Get(ctx, user.ID)
+		return err
+	})
+	return user, err
 }
 
 func (r *userRepository) UpdateLastLoginAt(ctx context.Context, id string) error {
@@ -264,21 +290,7 @@ func (r *userRepository) ReadAll(ctx context.Context, options ...rest.QueryOptio
 }
 
 func (r *userRepository) Save(ctx context.Context, u *model.User) (string, error) {
-	usr := loggedUser(ctx)
-	if !usr.IsAdmin {
-		return "", rest.ErrPermissionDenied
-	}
-	if err := validateUsernameUnique(ctx, r, u); err != nil {
-		return "", err
-	}
-	if err := validateScrobbleFilter(u); err != nil {
-		return "", err
-	}
-	err := r.Put(ctx, u)
-	if err != nil {
-		return "", err
-	}
-	return u.ID, err
+	return "", rest.ErrPermissionDenied
 }
 
 func (r *userRepository) Update(ctx context.Context, id string, entity model.User, _ ...string) error {
@@ -296,13 +308,16 @@ func (r *userRepository) Update(ctx context.Context, id string, entity model.Use
 		u.UserName = usr.UserName
 	}
 
-	// Decrypt the user's existing password before validating. This is required otherwise the existing password entered by the user will never match.
-	if err := r.decryptPassword(ctx, usr); err != nil {
+	if u.NewPassword != "" || u.CurrentPassword != "" {
+		return rest.ErrPermissionDenied
+	}
+	existing, err := r.Get(ctx, id)
+	if err != nil {
 		return err
 	}
-	if err := validatePasswordChange(u, usr); err != nil {
-		return err
-	}
+	u.CanDownload = existing.CanDownload
+	u.UserName = existing.UserName
+	u.IsAdmin = false
 	if err := validateUsernameUnique(ctx, r, u); err != nil {
 		return err
 	}
@@ -398,100 +413,6 @@ func (r *userRepository) deleteUsers(ctx context.Context, ids ...string) error {
 		}
 		if err := cleanupPluginUserReferences(ctx, r.db, id); err != nil {
 			return fmt.Errorf("cleaning plugin user references: %w", err)
-		}
-	}
-	return nil
-}
-
-func keyTo32Bytes(input string) []byte {
-	data := sha256.Sum256([]byte(input))
-	return data[0:]
-}
-
-func (r *userRepository) initPasswordEncryptionKey(ctx context.Context) error {
-	encKey = keyTo32Bytes(consts.DefaultEncryptionKey)
-	if conf.Server.PasswordEncryptionKey == "" {
-		return nil
-	}
-
-	key := keyTo32Bytes(conf.Server.PasswordEncryptionKey)
-	keySum := fmt.Sprintf("%x", sha256.Sum256(key))
-
-	props := NewPropertyRepository(r.db)
-	savedKeySum, err := props.Get(ctx, consts.PasswordsEncryptedKey)
-
-	// If passwords are already encrypted
-	if err == nil {
-		if savedKeySum != keySum {
-			log.Error("Password Encryption Key changed! Users won't be able to login!")
-			return errors.New("passwordEncryptionKey changed")
-		}
-		encKey = key
-		return nil
-	}
-
-	// if not, try to re-encrypt all current passwords with new encryption key,
-	// assuming they were encrypted with the DefaultEncryptionKey
-	sql := r.newSelect(ctx).Columns("id", "user_name", "password")
-	users := model.Users{}
-	err = r.queryAll(ctx, sql, &users)
-	if err != nil {
-		log.Error("Could not encrypt all passwords", err)
-		return err
-	}
-	log.Warn("New PasswordEncryptionKey set. Encrypting all passwords", "numUsers", len(users))
-	if err = r.decryptAllPasswords(ctx, users); err != nil {
-		return err
-	}
-	encKey = key
-	for i := range users {
-		u := users[i]
-		u.NewPassword = u.Password
-		if err := r.encryptPassword(ctx, &u); err == nil {
-			upd := Update(r.tableName).Set("password", u.NewPassword).Where(Eq{"id": u.ID})
-			_, err = r.executeSQL(ctx, upd)
-			if err != nil {
-				log.Error("Password NOT encrypted! This may cause problems!", "user", u.UserName, "id", u.ID, err)
-			} else {
-				log.Warn("Password encrypted successfully", "user", u.UserName, "id", u.ID)
-			}
-		}
-	}
-
-	err = props.Put(ctx, consts.PasswordsEncryptedKey, keySum)
-	if err != nil {
-		log.Error("Could not flag passwords as encrypted. It will cause login errors", err)
-		return err
-	}
-	return nil
-}
-
-// encrypts u.NewPassword
-func (r *userRepository) encryptPassword(ctx context.Context, u *model.User) error {
-	encPassword, err := utils.Encrypt(ctx, encKey, u.NewPassword)
-	if err != nil {
-		log.Error(ctx, "Error encrypting user's password", "user", u.UserName, err)
-		return err
-	}
-	u.NewPassword = encPassword
-	return nil
-}
-
-// decrypts u.Password
-func (r *userRepository) decryptPassword(ctx context.Context, u *model.User) error {
-	plaintext, err := utils.Decrypt(ctx, encKey, u.Password)
-	if err != nil {
-		log.Error(ctx, "Error decrypting user's password", "user", u.UserName, err)
-		return err
-	}
-	u.Password = plaintext
-	return nil
-}
-
-func (r *userRepository) decryptAllPasswords(ctx context.Context, users model.Users) error {
-	for i := range users {
-		if err := r.decryptPassword(ctx, &users[i]); err != nil {
-			return err
 		}
 	}
 	return nil

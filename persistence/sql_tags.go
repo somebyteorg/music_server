@@ -179,7 +179,7 @@ func (r *baseTagRepository) applyLibraryFiltering(ctx context.Context, sq Select
 
 	// For authenticated users, also join with user_library to filter by accessible libraries
 	user := loggedUser(ctx)
-	if user.ID != invalidUserId {
+	if user.ID != invalidUserId && !user.HasAllLibraryAccess() {
 		sq = sq.Join("user_library on user_library.library_id = library_tag.library_id AND user_library.user_id = ?", user.ID)
 	}
 

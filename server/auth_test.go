@@ -2,13 +2,10 @@ package server
 
 import (
 	"context"
-	"crypto/md5"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"time"
 
@@ -18,7 +15,6 @@ import (
 	"github.com/navidrome/navidrome/core/auth"
 	"github.com/navidrome/navidrome/log"
 	"github.com/navidrome/navidrome/model"
-	"github.com/navidrome/navidrome/model/id"
 	"github.com/navidrome/navidrome/model/request"
 	"github.com/navidrome/navidrome/tests"
 	. "github.com/onsi/ginkgo/v2"
@@ -91,131 +87,6 @@ var _ = Describe("Auth", func() {
 				createAdmin(failing)(resp, req)
 
 				Expect(resp.Code).To(Equal(http.StatusInternalServerError))
-			})
-		})
-
-		Describe("Login from HTTP headers", func() {
-			const (
-				trustedIpv4   = "192.168.0.42"
-				untrustedIpv4 = "8.8.8.8"
-				trustedIpv6   = "2001:4860:4860:1234:5678:0000:4242:8888"
-				untrustedIpv6 = "5005:0:3003"
-			)
-
-			fs := os.DirFS("tests/fixtures")
-
-			BeforeEach(func() {
-				usr := ds.User()
-				_ = usr.Put(ctx, &model.User{ID: "111", UserName: "janedoe", NewPassword: "abc123", Name: "Jane", IsAdmin: false})
-				req = httptest.NewRequest("GET", "/index.html", nil)
-				req.Header.Add("Remote-User", "janedoe")
-				resp = httptest.NewRecorder()
-				conf.Server.UILoginBackgroundURL = ""
-				conf.Server.ExtAuth.TrustedSources = "192.168.0.0/16,2001:4860:4860::/48"
-			})
-
-			It("sets auth data if IPv4 matches whitelist", func() {
-				req = req.WithContext(request.WithReverseProxyIp(req.Context(), trustedIpv4))
-				serveIndex(ds, fs, nil)(resp, req)
-
-				config := extractAppConfig(resp.Body.String())
-				parsed := config["auth"].(map[string]any)
-
-				Expect(parsed["id"]).To(Equal("111"))
-			})
-
-			It("sets no auth data if IPv4 does not match whitelist", func() {
-				req = req.WithContext(request.WithReverseProxyIp(req.Context(), untrustedIpv4))
-				serveIndex(ds, fs, nil)(resp, req)
-
-				config := extractAppConfig(resp.Body.String())
-				Expect(config["auth"]).To(BeNil())
-			})
-
-			It("sets auth data if IPv6 matches whitelist", func() {
-				req = req.WithContext(request.WithReverseProxyIp(req.Context(), trustedIpv6))
-				serveIndex(ds, fs, nil)(resp, req)
-
-				config := extractAppConfig(resp.Body.String())
-				parsed := config["auth"].(map[string]any)
-
-				Expect(parsed["id"]).To(Equal("111"))
-			})
-
-			It("sets no auth data if IPv6 does not match whitelist", func() {
-				req = req.WithContext(request.WithReverseProxyIp(req.Context(), untrustedIpv6))
-				serveIndex(ds, fs, nil)(resp, req)
-
-				config := extractAppConfig(resp.Body.String())
-				Expect(config["auth"]).To(BeNil())
-			})
-
-			It("creates user and sets auth data if user does not exist", func() {
-				newUser := "NEW_USER_" + id.NewRandom()
-
-				req = req.WithContext(request.WithReverseProxyIp(req.Context(), trustedIpv4))
-				req.Header.Set("Remote-User", newUser)
-				serveIndex(ds, fs, nil)(resp, req)
-
-				config := extractAppConfig(resp.Body.String())
-				parsed := config["auth"].(map[string]any)
-
-				Expect(parsed["username"]).To(Equal(newUser))
-			})
-
-			It("sets auth data if user exists", func() {
-				req = req.WithContext(request.WithReverseProxyIp(req.Context(), trustedIpv4))
-				serveIndex(ds, fs, nil)(resp, req)
-
-				config := extractAppConfig(resp.Body.String())
-				parsed := config["auth"].(map[string]any)
-
-				Expect(parsed["id"]).To(Equal("111"))
-				Expect(parsed["isAdmin"]).To(BeFalse())
-				Expect(parsed["name"]).To(Equal("Jane"))
-				Expect(parsed["username"]).To(Equal("janedoe"))
-				Expect(parsed["subsonicSalt"]).ToNot(BeEmpty())
-				Expect(parsed["subsonicToken"]).ToNot(BeEmpty())
-				salt := parsed["subsonicSalt"].(string)
-				token := fmt.Sprintf("%x", md5.Sum([]byte("abc123"+salt)))
-				Expect(parsed["subsonicToken"]).To(Equal(token))
-
-				// Request Header authentication should not generate a JWT token
-				Expect(parsed).ToNot(HaveKey("token"))
-			})
-
-			It("does not set auth data when listening on unix socket without whitelist", func() {
-				conf.Server.Address = "unix:/tmp/navidrome-test"
-				conf.Server.ExtAuth.TrustedSources = ""
-
-				// No ReverseProxyIp in request context
-				serveIndex(ds, fs, nil)(resp, req)
-
-				config := extractAppConfig(resp.Body.String())
-				Expect(config["auth"]).To(BeNil())
-			})
-
-			It("does not set auth data when listening on unix socket with incorrect whitelist", func() {
-				conf.Server.Address = "unix:/tmp/navidrome-test"
-
-				req = req.WithContext(request.WithReverseProxyIp(req.Context(), "@"))
-				serveIndex(ds, fs, nil)(resp, req)
-
-				config := extractAppConfig(resp.Body.String())
-				Expect(config["auth"]).To(BeNil())
-			})
-
-			It("sets auth data when listening on unix socket with correct whitelist", func() {
-				conf.Server.Address = "unix:/tmp/navidrome-test"
-				conf.Server.ExtAuth.TrustedSources = conf.Server.ExtAuth.TrustedSources + ",@"
-
-				req = req.WithContext(request.WithReverseProxyIp(req.Context(), "@"))
-				serveIndex(ds, fs, nil)(resp, req)
-
-				config := extractAppConfig(resp.Body.String())
-				parsed := config["auth"].(map[string]any)
-
-				Expect(parsed["id"]).To(Equal("111"))
 			})
 		})
 
@@ -378,56 +249,6 @@ var _ = Describe("Auth", func() {
 				Expect(validateIPAgainstList("10.0.0.1:1234", "192.168.0.0/16,10.0.0.0/8")).To(BeTrue())
 				Expect(validateIPAgainstList("172.16.0.1:9999", "192.168.0.0/16,10.0.0.0/8")).To(BeFalse())
 			})
-		})
-	})
-
-	Describe("handleLoginFromHeaders", func() {
-		var ds model.DataStore
-		var req *http.Request
-		const trustedIP = "192.168.0.42"
-
-		BeforeEach(func() {
-			ds = &tests.MockDataStore{}
-			req = httptest.NewRequest("GET", "/", nil)
-			req = req.WithContext(request.WithReverseProxyIp(req.Context(), trustedIP))
-			conf.Server.ExtAuth.TrustedSources = "192.168.0.0/16"
-			conf.Server.ExtAuth.UserHeader = "Remote-User"
-		})
-
-		It("makes the first user an admin", func() {
-			// No existing users
-			req.Header.Set("Remote-User", "firstuser")
-			result := handleLoginFromHeaders(ds, req)
-
-			Expect(result).ToNot(BeNil())
-			Expect(result["isAdmin"]).To(BeTrue())
-
-			// Verify user was created as admin
-			u, err := ds.User().FindByUsername(ctx, "firstuser")
-			Expect(err).To(BeNil())
-			Expect(u.IsAdmin).To(BeTrue())
-		})
-
-		It("does not make subsequent users admins", func() {
-			// Create the first user
-			_ = ds.User().Put(ctx, &model.User{
-				ID:       "existing-user-id",
-				UserName: "existinguser",
-				Name:     "Existing User",
-				IsAdmin:  true,
-			})
-
-			// Try to create a second user via proxy header
-			req.Header.Set("Remote-User", "seconduser")
-			result := handleLoginFromHeaders(ds, req)
-
-			Expect(result).ToNot(BeNil())
-			Expect(result["isAdmin"]).To(BeFalse())
-
-			// Verify user was created as non-admin
-			u, err := ds.User().FindByUsername(ctx, "seconduser")
-			Expect(err).To(BeNil())
-			Expect(u.IsAdmin).To(BeFalse())
 		})
 	})
 

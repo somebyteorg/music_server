@@ -146,7 +146,9 @@ const PlaylistSongs = ({ playlistId, readOnly, actions, ...props }) => {
 
   const toggleableFields = useMemo(() => {
     return {
-      trackNumber: isDesktop && <TextField source="id" label={'#'} />,
+      trackNumber: isDesktop && (
+        <TextField source="position" label={'#'} sortable={false} />
+      ),
       title: <SongTitleField source="title" showTrackNumbers={false} />,
       album: isDesktop && <AlbumLinkField source="album" />,
       artist: isDesktop && <ArtistLinkField source="artist" />,

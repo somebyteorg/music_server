@@ -54,7 +54,7 @@ const (
 	DevInitialUserName = "admin"
 	DevInitialName     = "Dev Admin"
 
-	URLPathUI           = "/app"
+	URLPathUI           = "/web"
 	URLPathNativeAPI    = "/api"
 	URLPathSubsonicAPI  = "/rest"
 	URLPathPublic       = "/share"

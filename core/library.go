@@ -73,19 +73,14 @@ func (s *libraryService) GetUserLibraries(ctx context.Context, userID string) (m
 
 func (s *libraryService) SetUserLibraries(ctx context.Context, userID string, libraryIDs []int) error {
 	// Verify user exists
-	user, err := s.ds.User().Get(ctx, userID)
+	_, err := s.ds.User().Get(ctx, userID)
 	if err != nil {
 		return err
 	}
 
-	// Admin users get all libraries automatically - don't allow manual assignment
-	if user.IsAdmin {
-		return fmt.Errorf("%w: cannot manually assign libraries to admin users", model.ErrValidation)
-	}
-
-	// Regular users must have at least one library
+	// Every user keeps at least one selected library.
 	if len(libraryIDs) == 0 {
-		return fmt.Errorf("%w: at least one library must be assigned to non-admin users", model.ErrValidation)
+		return fmt.Errorf("%w: at least one library must be selected", model.ErrValidation)
 	}
 
 	// Validate all library IDs exist
@@ -115,8 +110,7 @@ func (s *libraryService) ValidateLibraryAccess(ctx context.Context, userID strin
 		return fmt.Errorf("user not found in context")
 	}
 
-	// Admin users have access to all libraries
-	if user.IsAdmin {
+	if user.HasAllLibraryAccess() {
 		return nil
 	}
 

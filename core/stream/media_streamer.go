@@ -2,13 +2,13 @@ package stream
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"mime"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -60,76 +60,18 @@ func (j *streamJob) Key() string {
 	return fmt.Sprintf("%s.%s.%d.%d.%d.%d.%s.%d", j.mf.ID, j.mf.UpdatedAt.Format(time.RFC3339Nano), j.bitRate, j.sampleRate, j.bitDepth, j.channels, j.format, j.offset)
 }
 
-// NewStream creates a Stream for the given MediaFile and Request. It handles both raw streaming (no transcoding)
-// and transcoded streaming based on the requested format and bitrate. It also logs detailed information about
-// the streaming request and whether the transcoding result was served from cache or not.
+// NewStream always serves the listener's preferred original resource through Caddy.
+// Client format, bitrate and offset parameters never start a transcode.
 func (ms *mediaStreamer) NewStream(ctx context.Context, mf *model.MediaFile, req Request) (*Stream, error) {
-	var format string
-	var bitRate int
-	var cached bool
-	defer func() {
-		log.Info(ctx, "Streaming file", "title", mf.Title, "artist", mf.Artist, "format", format, "cached", cached,
-			"bitRate", bitRate, "sampleRate", req.SampleRate, "bitDepth", req.BitDepth, "channels", req.Channels,
-			"user", userName(ctx), "transcoding", format != "raw",
-			"originalFormat", mf.Suffix, "originalBitRate", mf.BitRate)
-	}()
-
-	format = req.Format
-	bitRate = req.BitRate
-	if format == "" || format == "raw" {
-		format = "raw"
-		bitRate = 0
-	}
-	s := &Stream{ctx: ctx, mf: mf, format: format, bitRate: bitRate, offset: req.Offset}
-	filePath := mf.AbsolutePath()
-
-	if format == "raw" {
-		log.Debug(ctx, "Streaming RAW file", "id", mf.ID, "path", filePath,
-			"requestBitrate", req.BitRate, "requestFormat", req.Format, "requestOffset", req.Offset,
-			"originalBitrate", mf.BitRate, "originalFormat", mf.Suffix,
-			"selectedBitrate", bitRate, "selectedFormat", format)
-		f, err := os.Open(filePath)
-		if err != nil {
-			return nil, err
-		}
-		s.ReadCloser = f
-		s.Seeker = f
-		s.format = mf.Suffix
-		return s, nil
-	}
-
-	job := &streamJob{
-		ms:         ms,
-		mf:         mf,
-		filePath:   filePath,
-		format:     format,
-		bitRate:    bitRate,
-		sampleRate: req.SampleRate,
-		bitDepth:   req.BitDepth,
-		channels:   req.Channels,
-		offset:     req.Offset,
-	}
-	r, err := ms.cache.Get(ctx, job)
+	selected, err := CommunityMedia(ctx, mf)
 	if err != nil {
-		// Rate-limit rejections are already logged at warn level by the
-		// producer; treating them as cache failures here would both
-		// double-log and mask actual cache problems.
-		if !errors.Is(err, ErrTooManyTranscodes) {
-			log.Error(ctx, "Error accessing transcoding cache", "id", mf.ID, err)
-		}
 		return nil, err
 	}
-	cached = r.Cached
-
-	s.ReadCloser = r
-	s.Seeker = r.Seeker
-
-	log.Debug(ctx, "Streaming TRANSCODED file", "id", mf.ID, "path", filePath,
-		"requestBitrate", req.BitRate, "requestFormat", req.Format, "requestOffset", req.Offset,
-		"originalBitrate", mf.BitRate, "originalFormat", mf.Suffix,
-		"selectedBitrate", bitRate, "selectedFormat", format, "cached", cached, "seekable", s.Seekable())
-
-	return s, nil
+	redirect, err := AccelPath(selected.Path)
+	if err != nil {
+		return nil, err
+	}
+	return &Stream{ctx: ctx, mf: selected, format: selected.Suffix, accel: redirect, ReadCloser: io.NopCloser(strings.NewReader(""))}, nil
 }
 
 type Stream struct {
@@ -137,6 +79,7 @@ type Stream struct {
 	mf      *model.MediaFile
 	bitRate int
 	format  string
+	accel   string
 	offset  int
 	io.ReadCloser
 	io.Seeker
@@ -166,6 +109,13 @@ func (s *Stream) EstimatedContentLength() int64 {
 // DevMatchEstimatedContentLength, the body is also cut or zero-padded to match it, so clients never
 // see a body that disagrees with the header.
 func (s *Stream) Serve(ctx context.Context, w http.ResponseWriter, r *http.Request) (int64, error) {
+	if s.accel != "" {
+		w.Header().Set("X-Accel-Redirect", s.accel)
+		w.Header().Set("Content-Type", s.ContentType())
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		return -1, nil
+	}
+
 	if s.Seekable() {
 		http.ServeContent(w, r, s.Name(), s.ModTime(), s)
 		return -1, nil

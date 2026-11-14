@@ -201,29 +201,6 @@ func CreatePrometheus() metrics.Metrics {
 	return metricsMetrics
 }
 
-func CreateScanner(ctx context.Context) model.Scanner {
-	sqlDB := db.Db()
-	dataStore := persistence.New(sqlDB)
-	broker := events.GetBroker()
-	uploader := artwork.NewUploader(dataStore)
-	playlistsPlaylists := playlists.NewPlaylists(dataStore, uploader)
-	metricsMetrics := metrics.GetPrometheusInstance(dataStore)
-	modelScanner := scanner.GetInstance(ctx, dataStore, broker, playlistsPlaylists, metricsMetrics)
-	return modelScanner
-}
-
-func CreateScanWatcher(ctx context.Context) scanner.Watcher {
-	sqlDB := db.Db()
-	dataStore := persistence.New(sqlDB)
-	broker := events.GetBroker()
-	uploader := artwork.NewUploader(dataStore)
-	playlistsPlaylists := playlists.NewPlaylists(dataStore, uploader)
-	metricsMetrics := metrics.GetPrometheusInstance(dataStore)
-	modelScanner := scanner.GetInstance(ctx, dataStore, broker, playlistsPlaylists, metricsMetrics)
-	watcher := scanner.GetWatcher(dataStore, modelScanner)
-	return watcher
-}
-
 func GetPlaybackServer() playback.PlaybackServer {
 	sqlDB := db.Db()
 	dataStore := persistence.New(sqlDB)

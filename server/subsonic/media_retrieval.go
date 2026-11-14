@@ -3,13 +3,15 @@ package subsonic
 import (
 	"context"
 	"errors"
-	"io"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/navidrome/navidrome/conf"
 	"github.com/navidrome/navidrome/consts"
+	"github.com/navidrome/navidrome/core/artwork"
+	"github.com/navidrome/navidrome/core/filedelivery"
+	"github.com/navidrome/navidrome/core/stream"
 	"github.com/navidrome/navidrome/log"
 	"github.com/navidrome/navidrome/model"
 	"github.com/navidrome/navidrome/resources"
@@ -37,7 +39,11 @@ func (api *Router) GetAvatar(w http.ResponseWriter, r *http.Request) (*responses
 		log.Warn(ctx, "User needs an email for gravatar to work", "username", username)
 		return api.getPlaceHolderAvatar(w, r)
 	}
-	http.Redirect(w, r, gravatar.Url(u.Email, 0), http.StatusFound) //nolint:gosec // URL is not constructed from user input
+	data, mime, err := filedelivery.RemoteImage(ctx, gravatar.Url(u.Email, 0))
+	if err != nil {
+		return nil, err
+	}
+	filedelivery.ServeImage(w, r, data, mime)
 	return nil, nil
 }
 
@@ -48,12 +54,19 @@ func (api *Router) getPlaceHolderAvatar(w http.ResponseWriter, r *http.Request) 
 		return nil, newError(responses.ErrorDataNotFound, "Avatar image not found")
 	}
 	defer f.Close()
-	_, _ = io.Copy(w, f)
-
-	return nil, nil
+	return nil, imghttp.ServeImage(w, r, &artwork.Image{ReadCloser: f, Placeholder: true}, "")
 }
 
 func (api *Router) GetCoverArt(w http.ResponseWriter, r *http.Request) (*responses.Subsonic, error) {
+	coverID, _ := req.Params(r).String("id")
+	served, coverErr := stream.ServeCommunityCover(r.Context(), w, r, coverID)
+	if coverErr != nil {
+		return nil, coverErr
+	}
+	if served {
+		return nil, nil
+	}
+
 	// If context is already canceled, discard request without further processing
 	if r.Context().Err() != nil {
 		return nil, nil //nolint:nilerr
@@ -82,15 +95,7 @@ func (api *Router) GetCoverArt(w http.ResponseWriter, r *http.Request) (*respons
 	defer img.Close()
 
 	artID, _ := model.ParseArtworkID(id)
-	if imghttp.WriteImageHeaders(w, r, img, artID.Hash) {
-		return nil, nil
-	}
-	cnt, err := io.Copy(w, img)
-	if err != nil {
-		log.Warn(ctx, "Error sending image", "count", cnt, err)
-	}
-
-	return nil, err
+	return nil, imghttp.ServeImage(w, r, img, artID.Hash)
 }
 
 func (api *Router) GetLyrics(r *http.Request) (*responses.Subsonic, error) {

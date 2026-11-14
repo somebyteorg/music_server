@@ -73,7 +73,6 @@ func (api *Router) routes() http.Handler {
 		api.addArtistRoute(r)
 		rx(r, "/genre", api.ds.Genre(), false)
 		rx(r, "/player", api.ds.Player(), true)
-		rx(r, "/transcoding", api.ds.Transcoding(), conf.Server.EnableTranscodingConfig)
 		api.addRadioRoute(r)
 		rx(r, "/tag", api.ds.Tag(), false)
 		rx(r, "/scrobble", api.ds.Scrobble(), false)
@@ -96,7 +95,7 @@ func (api *Router) routes() http.Handler {
 			api.addUserLibraryRoute(r)
 			api.addPluginRoute(r)
 			api.addMetadataRoute(r)
-			rx(r, "/library", api.libs.Repository(), true)
+			rx(r, "/library", api.libs.Repository(), false)
 		})
 	})
 

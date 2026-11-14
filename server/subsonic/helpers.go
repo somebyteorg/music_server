@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"mime"
 	"net/http"
 	"slices"
 	"sort"
@@ -243,11 +242,6 @@ func childFromMediaFile(ctx context.Context, mf model.MediaFile) responses.Child
 		child.AverageRating = mf.AverageRating
 	}
 
-	format, _ := getTranscoding(ctx)
-	if mf.Suffix != "" && format != "" && mf.Suffix != format {
-		child.TranscodedSuffix = format
-		child.TranscodedContentType = mime.TypeByExtension("." + format)
-	}
 	child.BookmarkPosition = mf.BookmarkPosition
 	child.OpenSubsonicChild = osChildFromMediaFile(ctx, mf)
 	return child

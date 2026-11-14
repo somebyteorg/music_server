@@ -100,8 +100,16 @@ func (api *Router) updatePlaylist(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// A present Ids replaces the track list. An empty list must clear it explicitly, since Create
-	// can't persist an empty track list (the repository skips track writes when the list is empty).
+	// Validate metadata permissions before replacing tracks in a combined request.
+	current, err := api.playlists.Get(ctx, id)
+	if err != nil {
+		api.playlistError(w, r, err)
+		return
+	}
+	if !current.CanEdit && (body.Name != nil && *body.Name != current.Name || body.IsPublic != nil && *body.IsPublic != current.Public) {
+		api.playlistError(w, r, model.ErrNotAuthorized)
+		return
+	}
 	if body.Ids != nil {
 		if len(*body.Ids) == 0 {
 			if err := api.clearPlaylist(ctx, id); err != nil {
@@ -130,17 +138,10 @@ func (api *Router) updatePlaylist(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// clearPlaylist removes every track from a playlist. RemoveTracks enforces ownership.
+// clearPlaylist replaces the track list without loading the previous entries.
 func (api *Router) clearPlaylist(ctx context.Context, id string) error {
-	pls, err := api.playlists.GetWithTracks(ctx, id)
-	if err != nil {
-		return err
-	}
-	if len(pls.Tracks) == 0 {
-		return nil
-	}
-	entryIDs := slice.Map(pls.Tracks, func(t model.PlaylistTrack) string { return t.ID })
-	return api.playlists.RemoveTracks(ctx, id, entryIDs)
+	_, err := api.playlists.Create(ctx, id, "", []string{})
+	return err
 }
 
 // playlistTrackPage streams one page of a playlist's tracks. Streams because a playlist can be the
@@ -371,8 +372,7 @@ func (api *Router) movePlaylistItem(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// Clients probe these before offering edits. Navidrome has no per-playlist ACL, so CanEdit carries
-// only editability; ownership is enforced on write, and a lookup error 404s to prevent probing.
+// Clients probe these before offering edits. Use the caller's owner/collaborator permissions.
 func (api *Router) getPlaylistUsers(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id, ok := itemIDParam(w, r, "playlistId")
@@ -385,7 +385,7 @@ func (api *Router) getPlaylistUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u, _ := request.UserFrom(ctx)
-	api.ok(w, r, []dto.PlaylistUserPermissions{{UserId: dto.EncodeID(u.ID), CanEdit: pls.TracksEditable()}})
+	api.ok(w, r, []dto.PlaylistUserPermissions{{UserId: dto.EncodeID(u.ID), CanEdit: pls.CanEditTracks && pls.TracksEditable()}})
 }
 
 func (api *Router) getPlaylistUser(w http.ResponseWriter, r *http.Request) {
@@ -400,5 +400,5 @@ func (api *Router) getPlaylistUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userId := chi.URLParam(r, "userId")
-	api.ok(w, r, dto.PlaylistUserPermissions{UserId: userId, CanEdit: pls.TracksEditable()})
+	api.ok(w, r, dto.PlaylistUserPermissions{UserId: userId, CanEdit: pls.CanEditTracks && pls.TracksEditable()})
 }

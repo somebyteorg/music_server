@@ -54,6 +54,8 @@ type configOptions struct {
 	TLSKey                          string
 	UILoginBackgroundURL            string
 	UIWelcomeMessage                string
+	EmosURL                         string
+	EmosURLLink                     string
 	MaxSidebarPlaylists             int
 	EnableTranscodingConfig         bool
 	EnableDownloads                 bool
@@ -1005,6 +1007,7 @@ func setViperDefaults() {
 	viper.SetDefault("databaseurl", consts.DefaultDatabaseURL)
 	viper.SetDefault("databaseschema", "navidrome")
 	viper.SetDefault("databasemaxconnections", 0)
+	viper.SetDefault("musicaccelprefix", "/_protected/music")
 	viper.SetDefault("musicfolder", filepath.Join(".", "music"))
 	viper.SetDefault("cachefolder", "")
 	viper.SetDefault("datafolder", ".")
@@ -1015,7 +1018,7 @@ func setViperDefaults() {
 	viper.SetDefault("unixsocketperm", "0660")
 	viper.SetDefault("enforcenonrootuser", false)
 	viper.SetDefault("sessiontimeout", consts.DefaultSessionTimeout)
-	viper.SetDefault("baseurl", "")
+	viper.SetDefault("baseurl", "/navidrome")
 	viper.SetDefault("tlscert", "")
 	viper.SetDefault("tlskey", "")
 	viper.SetDefault("uiloginbackgroundurl", consts.DefaultUILoginBackgroundURL)
@@ -1060,7 +1063,9 @@ func setViperDefaults() {
 	viper.SetDefault("enablestarrating", true)
 	viper.SetDefault("enableuserediting", true)
 	viper.SetDefault("defaulttheme", "Dark")
-	viper.SetDefault("defaultlanguage", "")
+	viper.SetDefault("defaultlanguage", "zh-Hans")
+	viper.SetDefault("emosurl", "https://emos.best")
+	viper.SetDefault("emosurllink", "https://emos.best/api/sign?state=emos_music_server")
 	viper.SetDefault("defaultuivolume", consts.DefaultUIVolume)
 	viper.SetDefault("uisearchdebouncems", consts.DefaultUISearchDebounceMs)
 	viper.SetDefault("uicoverartsize", consts.DefaultUICoverArtSize)
@@ -1092,11 +1097,11 @@ func setViperDefaults() {
 	viper.SetDefault("jukebox.devices", []AudioDeviceDefinition{})
 	viper.SetDefault("jukebox.default", "")
 	viper.SetDefault("jukebox.adminonly", true)
-	viper.SetDefault("scanner.enabled", true)
+	viper.SetDefault("scanner.enabled", false)
 	viper.SetDefault("scanner.schedule", "0")
 	viper.SetDefault("scanner.extractor", consts.DefaultScannerExtractor)
 	viper.SetDefault("scanner.watcherwait", consts.DefaultWatcherWait)
-	viper.SetDefault("scanner.scanonstartup", true)
+	viper.SetDefault("scanner.scanonstartup", false)
 	viper.SetDefault("scanner.artistjoiner", consts.ArtistJoiner)
 	viper.SetDefault("scanner.artistsplitexceptions", []string{})
 	viper.SetDefault("scanner.genreseparators", "")
@@ -1218,6 +1223,8 @@ func InitConfig(cfgFile string, loadEnvVars bool) {
 		replacer := strings.NewReplacer(".", "_")
 		viper.SetEnvKeyReplacer(replacer)
 		viper.AutomaticEnv()
+		_ = viper.BindEnv("emosurl", "EMOS_URL")
+		_ = viper.BindEnv("emosurllink", "EMOS_URL_LINK")
 	}
 
 	err := viper.ReadInConfig()

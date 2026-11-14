@@ -3,35 +3,30 @@ package public
 import (
 	"context"
 	"net/http"
-	"path"
+	"net/url"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/navidrome/navidrome/conf"
-	"github.com/navidrome/navidrome/consts"
 	"github.com/navidrome/navidrome/core"
 	"github.com/navidrome/navidrome/core/artwork"
 	"github.com/navidrome/navidrome/core/publicurl"
 	"github.com/navidrome/navidrome/core/stream"
 	"github.com/navidrome/navidrome/model"
 	"github.com/navidrome/navidrome/server"
-	"github.com/navidrome/navidrome/ui"
 )
 
 type Router struct {
 	http.Handler
-	artwork       artwork.Artwork
-	streamer      stream.MediaStreamer
-	decider       stream.TranscodeDecider
-	archiver      core.Archiver
-	share         core.Share
-	assetsHandler http.Handler
-	ds            model.DataStore
+	artwork  artwork.Artwork
+	streamer stream.MediaStreamer
+	decider  stream.TranscodeDecider
+	archiver core.Archiver
+	share    core.Share
+	ds       model.DataStore
 }
 
 func New(ds model.DataStore, artwork artwork.Artwork, streamer stream.MediaStreamer, decider stream.TranscodeDecider, share core.Share, archiver core.Archiver) *Router {
 	p := &Router{ds: ds, artwork: artwork, streamer: streamer, decider: decider, share: share, archiver: archiver}
-	shareRoot := path.Join(conf.Server.BasePath, consts.URLPathPublic)
-	p.assetsHandler = http.StripPrefix(shareRoot, http.FileServer(http.FS(ui.BuildAssets())))
 	p.Handler = p.routes()
 
 	return p
@@ -54,14 +49,11 @@ func (pub *Router) routes() http.Handler {
 			}
 			r.HandleFunc("/{id}/m3u", pub.handleM3U)
 			r.HandleFunc("/{id}", pub.handleShares)
-			r.HandleFunc("/", pub.handleShares)
-			r.Handle("/*", pub.assetsHandler)
 		}
 	})
 	return r
 }
 
 func ShareURL(ctx context.Context, id string) string {
-	uri := path.Join(consts.URLPathPublic, id)
-	return publicurl.PublicURL(ctx, uri, nil)
+	return publicurl.WebURL(ctx, url.Values{"share": {id}})
 }

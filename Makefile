@@ -37,7 +37,7 @@ dev: check_env   ##@Development Start Navidrome in development mode, with hot-re
 	npx foreman -j Procfile.dev -p 4533 start
 .PHONY: dev
 
-server: check_go_env buildjs ##@Development Start the backend in development mode
+server: check_go_env ##@Development Start the backend in development mode
 	go tool reflex -d none -c reflex.conf
 .PHONY: server
 
@@ -187,14 +187,14 @@ setup-git: ##@Development Setup Git hooks (pre-commit and pre-push)
 	@(cd .git/hooks && ln -sf ../../git/* .)
 .PHONY: setup-git
 
-build: check_go_env buildjs ##@Build Build the project
+build: check_go_env ##@Build Build the backend
 	go build -ldflags="-X github.com/navidrome/navidrome/consts.gitSha=$(GIT_SHA) -X github.com/navidrome/navidrome/consts.gitTag=$(GIT_TAG)" -tags=$(GO_BUILD_TAGS)
 .PHONY: build
 
 buildall: deprecated build
 .PHONY: buildall
 
-debug-build: check_go_env buildjs ##@Build Build the project (with remote debug on)
+debug-build: check_go_env ##@Build Build the backend (with remote debug on)
 	go build -gcflags="all=-N -l" -ldflags="-X github.com/navidrome/navidrome/consts.gitSha=$(GIT_SHA) -X github.com/navidrome/navidrome/consts.gitTag=$(GIT_TAG)" -tags=$(GO_BUILD_TAGS)
 .PHONY: debug-build
 

@@ -90,7 +90,7 @@ func (r *playlistRepository) refreshSmartPlaylistTree(ctx context.Context, pls *
 		return false
 	}
 
-	insSql := Insert("playlist_tracks").Columns("id", "playlist_id", "media_file_id").Select(sq)
+	insSql := Insert("playlist_tracks").Columns("sort_key", "playlist_id", "media_file_id").Select(sq)
 	if _, err = r.executeSQL(ctx, insSql); err != nil {
 		log.Error(ctx, "Error refreshing smart playlist tracks", "playlist", pls.Name, "id", pls.ID, err)
 		return false
@@ -215,7 +215,7 @@ func (r *playlistRepository) buildSmartPlaylistQuery(ctx context.Context, pls *m
 	if orderBy == "" {
 		orderBy = "media_file.id"
 	}
-	sq := Select("row_number() over (order by "+orderBy+") as id", "'"+pls.ID+"' as playlist_id", "media_file.id as media_file_id").
+	sq := Select("row_number() over (order by "+orderBy+") * 1048576 as sort_key", "'"+pls.ID+"' as playlist_id", "media_file.id as media_file_id").
 		From("media_file")
 	sq = rulesSQL.applyRequiredJoins(sq, userID)
 	sq = r.applyLibraryFilter(ctx, sq, "media_file")

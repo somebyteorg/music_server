@@ -66,7 +66,7 @@ func (l Library) NeedsPIDRescan() bool {
 
 const (
 	DefaultLibraryID   = 1
-	DefaultLibraryName = "Music Library"
+	DefaultLibraryName = "emos_music"
 )
 
 type Libraries []Library

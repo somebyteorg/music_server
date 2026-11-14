@@ -17,10 +17,6 @@ import (
 func initialSetup(ds model.DataStore) {
 	ctx := context.TODO()
 	err := ds.WithTx(ctx, func(tx model.DataStore) error {
-		if err := tx.Library().StoreMusicFolder(ctx); err != nil {
-			return err
-		}
-
 		properties := tx.Property()
 		_, err := properties.Get(ctx, consts.InitialSetupFlagKey)
 		if err == nil {

@@ -122,7 +122,7 @@ const UserMenu = (props) => {
                 })
               : null,
           )}
-          {(!config.auth || !!config.extAuthLogoutURL) && logout}
+          {logout}
         </MenuList>
       </Popover>
     </div>

@@ -21,6 +21,10 @@ type Playlist struct {
 	Annotations `structs:"-"`
 	ItemImage   `structs:"-"`
 
+	CanEdit          bool           `structs:"-" json:"canEdit"`
+	CanEditTracks    bool           `structs:"-" json:"canEditTracks"`
+	CoverID          *string        `structs:"cover_id" json:"coverId,omitempty"`
+	DeletedAt        *time.Time     `structs:"deleted_at" json:"-"`
 	ID               string         `structs:"id" json:"id"`
 	Name             string         `structs:"name" json:"name"`
 	Comment          string         `structs:"comment" json:"comment"`
@@ -224,6 +228,8 @@ type PlaylistRepository interface {
 }
 
 type PlaylistTrack struct {
+	SortKey     int64  `json:"-"`
+	Position    int    `structs:"-" json:"position"`
 	ID          string `json:"id"`
 	MediaFileID string `json:"mediaFileId"`
 	PlaylistID  string `json:"playlistId"`

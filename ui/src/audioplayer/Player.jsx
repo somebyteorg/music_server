@@ -22,7 +22,6 @@ import {
   currentPlaying,
   refreshQueue,
   setPlayMode,
-  setTranscodingProfile,
   setVolume,
   syncQueue,
 } from '../actions'
@@ -33,7 +32,6 @@ import locale from './locale'
 import { keyMap } from '../hotkeys'
 import keyHandlers from './keyHandlers'
 import { calculateGain } from '../utils/calculateReplayGain'
-import { detectBrowserProfile, decisionService } from '../transcode'
 
 const Player = () => {
   const theme = useCurrentTheme()
@@ -56,8 +54,7 @@ const Player = () => {
 
   const { authenticated } = useAuthState()
 
-  // Keep a ref to playerState so the mount effect can read the latest value
-  // without re-triggering on every queue/position change
+  // Keep the latest queue available to playback callbacks.
   const playerStateRef = useRef(playerState)
   playerStateRef.current = playerState
 
@@ -76,54 +73,10 @@ const Player = () => {
     heartbeatTrackId ? config.playbackReportIntervalMs : null,
   )
 
-  // Detect browser codec profile and eagerly resolve transcode URLs for the
-  // persisted queue once on mount (e.g. after a browser refresh)
+  // Refresh persisted queue entries to use original-file playback URLs.
   useEffect(() => {
-    const profile = detectBrowserProfile()
-    decisionService.setProfile(profile)
-    dispatch(setTranscodingProfile(profile))
-
-    const state = playerStateRef.current
-    const currentIdx = state.savedPlayIndex || 0
-    const trackIds = state.queue
-      .slice(currentIdx, currentIdx + 4)
-      .filter((item) => !item.isRadio && item.trackId)
-      .map((item) => item.trackId)
-
-    if (trackIds.length === 0) {
-      dispatch(refreshQueue())
-      return
-    }
-
-    Promise.allSettled(
-      trackIds.map((id) =>
-        decisionService.resolveStreamUrl(id).then((url) => [id, url]),
-      ),
-    ).then((results) => {
-      const resolvedUrls = {}
-      results.forEach((r) => {
-        if (r.status === 'fulfilled') {
-          resolvedUrls[r.value[0]] = r.value[1]
-        }
-      })
-      dispatch(refreshQueue(resolvedUrls))
-    })
+    dispatch(refreshQueue())
   }, [dispatch])
-
-  // Pre-fetch transcode decisions for next 2-3 songs when queue or position changes
-  useEffect(() => {
-    if (!playerState.queue.length) return
-
-    const currentIdx = playerState.savedPlayIndex || 0
-    const nextSongIds = playerState.queue
-      .slice(currentIdx + 1, currentIdx + 4)
-      .filter((item) => !item.isRadio)
-      .map((item) => item.trackId)
-
-    if (nextSongIds.length > 0) {
-      decisionService.prefetchDecisions(nextSongIds)
-    }
-  }, [playerState.queue, playerState.savedPlayIndex])
 
   const visible = authenticated && playerState.queue.length > 0
   const isRadio = playerState.current?.isRadio || false
@@ -371,28 +324,6 @@ const Player = () => {
     }
   }, [])
 
-  const onAudioError = useCallback(
-    (error, currentPlayId, audioLists, audioInfo) => {
-      // Invalidate all cached decisions — token may be stale
-      decisionService.invalidateAll()
-
-      // Pre-fetch decisions for upcoming songs with fresh tokens
-      const currentIdx = playerState.queue.findIndex(
-        (item) => item.uuid === currentPlayId,
-      )
-      if (currentIdx >= 0) {
-        const nextSongIds = playerState.queue
-          .slice(currentIdx + 1, currentIdx + 4)
-          .filter((item) => !item.isRadio)
-          .map((item) => item.trackId)
-        if (nextSongIds.length > 0) {
-          decisionService.prefetchDecisions(nextSongIds)
-        }
-      }
-    },
-    [playerState.queue],
-  )
-
   const onBeforeDestroy = useCallback(() => {
     return new Promise((resolve, reject) => {
       if (currentTrackId && !playerStateRef.current?.current?.isRadio) {
@@ -467,7 +398,6 @@ const Player = () => {
         onPlayModeChange={(mode) => dispatch(setPlayMode(mode))}
         onAudioEnded={onAudioEnded}
         onCoverClick={onCoverClick}
-        onAudioError={onAudioError}
         onBeforeDestroy={onBeforeDestroy}
         getAudioInstance={setAudioInstance}
       />

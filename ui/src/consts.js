@@ -1,8 +1,5 @@
 export const REST_URL = '/api'
 
-export const INSIGHTS_DOC_URL =
-  'https://navidrome.org/docs/getting-started/insights'
-
 export const M3U_MIME_TYPE = 'audio/x-mpegurl'
 
 export const AUTO_THEME_ID = 'AUTO_THEME_ID'
@@ -24,7 +21,7 @@ DraggableTypes.ALL.push(
   DraggableTypes.ARTIST,
 )
 
-export const RADIO_PLACEHOLDER_IMAGE = 'internet-radio-icon.svg'
+export const RADIO_PLACEHOLDER_IMAGE = `${import.meta.env.BASE_URL}internet-radio-icon.svg`
 
 export const DEFAULT_SHARE_BITRATE = 128
 

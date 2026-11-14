@@ -3,12 +3,12 @@ package public
 import (
 	"context"
 	"errors"
-	"io"
 	"net/http"
 	"time"
 
 	"github.com/navidrome/navidrome/core/artwork"
 	"github.com/navidrome/navidrome/core/auth"
+	"github.com/navidrome/navidrome/core/stream"
 	"github.com/navidrome/navidrome/log"
 	"github.com/navidrome/navidrome/model"
 	"github.com/navidrome/navidrome/model/request"
@@ -42,6 +42,14 @@ func (pub *Router) handleImages(w http.ResponseWriter, r *http.Request) {
 	// The token is the authorization, so the entity check must ask "is it still there", not
 	// "may this user see it" -- the latter would hide a shared private playlist.
 	ctx = request.WithUser(ctx, model.User{IsAdmin: true})
+	served, communityErr := stream.ServeCommunityCover(ctx, w, r, artId.String())
+	if communityErr != nil {
+		http.Error(w, "Artwork not found", http.StatusNotFound)
+		return
+	}
+	if served {
+		return
+	}
 	size := p.IntOr("size", 0)
 	square := p.BoolOr("square", false)
 
@@ -64,12 +72,9 @@ func (pub *Router) handleImages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	defer img.Close()
-	if imghttp.WriteImageHeaders(w, r, img, artId.Hash) {
-		return
-	}
-	cnt, err := io.Copy(w, img)
-	if err != nil {
-		log.Warn(ctx, "Error sending image", "count", cnt, err)
+	if err := imghttp.ServeImage(w, r, img, artId.Hash); err != nil {
+		log.Warn(ctx, "Error preparing image", "id", id, err)
+		http.Error(w, "Error retrieving coverArt", http.StatusInternalServerError)
 	}
 }
 

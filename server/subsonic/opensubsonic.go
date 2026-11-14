@@ -9,11 +9,9 @@ import (
 func (api *Router) GetOpenSubsonicExtensions(_ *http.Request) (*responses.Subsonic, error) {
 	response := newResponse()
 	extensions := responses.OpenSubsonicExtensions{
-		{Name: "transcodeOffset", Versions: []int32{1}},
 		{Name: "formPost", Versions: []int32{1}},
 		{Name: "songLyrics", Versions: []int32{1, 2}},
 		{Name: "indexBasedQueue", Versions: []int32{1}},
-		{Name: "transcoding", Versions: []int32{1}},
 		{Name: "playbackReport", Versions: []int32{1}},
 		{Name: "topSongsByArtistId", Versions: []int32{1}},
 		{Name: "apiKeyAuthentication", Versions: []int32{1}},

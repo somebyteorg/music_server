@@ -21,7 +21,6 @@ vi.mock('../subsonic', () => ({
         },
       }),
     ),
-    startScan: vi.fn(),
   },
 }))
 

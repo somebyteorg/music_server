@@ -63,7 +63,6 @@ ARG GIT_SHA
 ARG GIT_TAG
 
 RUN --mount=type=bind,source=. \
-    --mount=from=ui,source=/build,target=./ui/build,ro \
     --mount=type=cache,target=/root/.cache \
     --mount=type=cache,target=/go/pkg/mod <<EOT
     set -e
@@ -107,7 +106,6 @@ ARG GIT_SHA
 ARG GIT_TAG
 
 RUN --mount=type=bind,source=. \
-    --mount=from=ui,source=/build,target=./ui/build,ro \
     --mount=from=osxcross,src=/osxcross/SDK,target=/xx-sdk,ro \
     --mount=type=cache,target=/root/.cache \
     --mount=type=cache,target=/go/pkg/mod <<EOT

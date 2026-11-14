@@ -194,7 +194,6 @@ func (api *Router) routes() http.Handler {
 		r.Head("/audio/{itemId}/stream", api.streamAudio)
 		r.Head("/audio/{itemId}/stream.{container}", api.streamAudio)
 		r.Head("/audio/{itemId}/universal", api.streamUniversal)
-		r.Get("/audio/{itemId}/main.m3u8", api.streamHls)
 		r.Get("/items/{itemId}/playbackinfo", api.getPlaybackInfo)
 		r.Post("/items/{itemId}/playbackinfo", api.getPlaybackInfo)
 		r.Get("/audio/{itemId}/lyrics", api.getLyrics)

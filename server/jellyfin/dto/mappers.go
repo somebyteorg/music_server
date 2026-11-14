@@ -113,7 +113,7 @@ func MediaSourceFromMediaFile(mf model.MediaFile) MediaSourceInfo {
 		Bitrate:              mf.BitRate * 1000, // Navidrome stores kbps; Jellyfin's Bitrate is bps.
 		SupportsDirectPlay:   true,
 		SupportsDirectStream: true,
-		SupportsTranscoding:  true,
+		SupportsTranscoding:  false,
 		IsRemote:             false,
 		SupportsProbing:      true,
 		MediaStreams:         streams,

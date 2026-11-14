@@ -1,0 +1,30 @@
+EmosURL = "https://emos.best"
+EmosURLLink = "https://emos.best/api/sign?state=emos_music_server"
+DatabaseURL = "postgres://postgres:postgres@127.0.0.1:5432/emos_music_server?sslmode=disable"
+DatabaseSchema = "public"
+DataFolder = "../storage/server"
+PasswordEncryptionKey = "replace-with-a-random-secret"
+BaseUrl = "/navidrome"
+DefaultLanguage = "zh-Hans"
+Address = "0.0.0.0"
+Port = 4533
+LogLevel = "warn"
+Deezer.Enabled = false
+EnableInsightsCollector = false
+EnableTranscodingConfig = false
+EnableMediaFileCoverArt = false
+EnableArtworkPrecache = false
+EnableArtworkUpload = false
+EnableScheduledDBAnalyze=false
+EnableSharing = false
+EnableUserEditing = false
+EnableExternalServices = false
+AutoImportPlaylists = false
+Jellyfin.Enabled = true
+Jellyfin.ServerName = "emos music"
+Jellyfin.QuickConnect = false
+LastFM.Enabled = false
+ListenBrainz.Enabled = false
+Plugins.Enabled = false
+Scanner.Enabled = false
+Scanner.ScanOnStartup = false

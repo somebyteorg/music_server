@@ -5,18 +5,37 @@ import (
 	"errors"
 	"net/http"
 	"path"
+	"time"
 
+	"github.com/deluan/rest"
 	"github.com/navidrome/navidrome/conf"
 	"github.com/navidrome/navidrome/consts"
 	"github.com/navidrome/navidrome/core/auth"
 	"github.com/navidrome/navidrome/core/publicurl"
 	"github.com/navidrome/navidrome/log"
 	"github.com/navidrome/navidrome/model"
-	"github.com/navidrome/navidrome/server"
-	"github.com/navidrome/navidrome/ui"
 	. "github.com/navidrome/navidrome/utils/gg"
 	"github.com/navidrome/navidrome/utils/req"
+	"github.com/navidrome/navidrome/utils/slice"
 )
+
+type shareResponse struct {
+	ID           string       `json:"id"`
+	Description  string       `json:"description"`
+	Downloadable bool         `json:"downloadable"`
+	URL          string       `json:"url"`
+	ImageURL     string       `json:"imageUrl"`
+	Tracks       []shareTrack `json:"tracks"`
+}
+
+type shareTrack struct {
+	ID        string    `json:"id"`
+	Title     string    `json:"title"`
+	Artist    string    `json:"artist"`
+	Album     string    `json:"album"`
+	UpdatedAt time.Time `json:"updatedAt"`
+	Duration  float32   `json:"duration"`
+}
 
 func (pub *Router) handleShares(w http.ResponseWriter, r *http.Request) {
 	id, err := req.Params(r).String(":id")
@@ -25,14 +44,6 @@ func (pub *Router) handleShares(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// If requested file is a UI asset, just serve it
-	_, err = ui.BuildAssets().Open(id)
-	if err == nil {
-		pub.assetsHandler.ServeHTTP(w, r)
-		return
-	}
-
-	// If it is not, consider it a share ID
 	s, err := pub.share.Load(r.Context(), id)
 	if err != nil {
 		checkShareError(r.Context(), w, err, id)
@@ -40,7 +51,14 @@ func (pub *Router) handleShares(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s = pub.mapShareInfo(r, *s)
-	server.IndexWithShare(pub.ds, ui.BuildAssets(), s)(w, r)
+	_ = rest.RespondWithJSON(w, http.StatusOK, shareResponse{
+		ID: s.ID, Description: s.Description, Downloadable: s.Downloadable,
+		URL: s.URL, ImageURL: s.ImageURL,
+		Tracks: slice.Map(s.Tracks, func(track model.MediaFile) shareTrack {
+			return shareTrack{ID: track.ID, Title: track.Title, Artist: track.Artist, Album: track.Album,
+				UpdatedAt: track.UpdatedAt, Duration: track.Duration}
+		}),
+	})
 }
 
 func (pub *Router) handleM3U(w http.ResponseWriter, r *http.Request) {

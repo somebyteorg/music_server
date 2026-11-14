@@ -177,18 +177,11 @@ func (api *Router) routes() http.Handler {
 		})
 		r.Group(func(r chi.Router) {
 			r.Use(getPlayer(api.players))
-			h(r, "getScanStatus", api.GetScanStatus)
-			h(r.With(adminOnly), "startScan", api.StartScan)
-		})
-		r.Group(func(r chi.Router) {
-			r.Use(getPlayer(api.players))
 			hr(r, "getAvatar", api.GetAvatar)
 			h(r, "getLyrics", api.GetLyrics)
 			h(r, "getLyricsBySongId", api.GetLyricsBySongId)
 			hr(r, "stream", api.Stream)
 			hr(r, "download", api.Download)
-			hr(r, "getTranscodeDecision", api.GetTranscodeDecision)
-			hr(r, "getTranscodeStream", api.GetTranscodeStream)
 		})
 		r.Group(func(r chi.Router) {
 			r.Use(server.ThrottleBacklog(conf.Server.DevArtworkMaxRequests, conf.Server.DevArtworkThrottleBacklogLimit,

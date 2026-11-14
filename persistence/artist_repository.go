@@ -194,9 +194,8 @@ func (r *artistRepository) applyLibraryFilterToArtistQuery(ctx context.Context, 
 	query = query.Join("library_artist on library_artist.artist_id = artist.id")
 	//query = query.Join("library_artist on library_artist.artist_id = artist.id AND library_artist.stats != '{}'")
 
-	// Admin users see all artists from all libraries, no additional filtering needed
-	if user.ID != invalidUserId && !user.IsAdmin {
-		// Apply library filtering only for non-admin users by joining with their accessible libraries
+	if user.ID != invalidUserId && !user.HasAllLibraryAccess() {
+		// Apply each user's selected libraries when browsing artists.
 		query = query.Join("user_library on user_library.library_id = library_artist.library_id AND user_library.user_id = ?", user.ID)
 	}
 

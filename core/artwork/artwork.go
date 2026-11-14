@@ -3,16 +3,20 @@ package artwork
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/navidrome/navidrome/conf"
 	"github.com/navidrome/navidrome/consts"
 	"github.com/navidrome/navidrome/core/agents"
 	"github.com/navidrome/navidrome/core/ffmpeg"
+	"github.com/navidrome/navidrome/core/filedelivery"
+	"github.com/navidrome/navidrome/db"
 	"github.com/navidrome/navidrome/log"
 	"github.com/navidrome/navidrome/model"
 	"github.com/navidrome/navidrome/resources"
@@ -31,6 +35,8 @@ type Image struct {
 	ETag        string // representation validator; "" means Hash applies (full-size original)
 	LastUpdated time.Time
 	Placeholder bool
+	Path        string // storage-relative source path from music_cover
+	MIME        string
 }
 
 // representationTag varies with dimensions and encode settings, so a config change invalidates
@@ -105,17 +111,38 @@ func (s *service) Get(ctx context.Context, artID model.ArtworkID, size int, squa
 	if artID.ID == "" {
 		return nil, ErrUnavailable
 	}
-	if size < 0 {
-		size = 0 // a negative size means full-size, not a giant (OOM) resize rectangle
+	if artID.Kind == model.KindDiscArtwork {
+		albumID, _, err := model.ParseDiscArtworkID(artID.ID)
+		if err != nil {
+			return nil, model.ErrNotFound
+		}
+		artID = model.ArtworkID{Kind: model.KindAlbumArtwork, ID: albumID}
 	}
-	switch artID.Kind {
-	case model.KindDiscArtwork:
-		return s.serveDisc(ctx, artID, size, square)
-	case model.KindMediaFileArtwork:
-		return s.serveMediaFile(ctx, artID, size, square)
-	default:
-		return s.serveEntity(ctx, artID, size, square)
+	if !entityExists(ctx, s.ds, artID) {
+		return nil, model.ErrNotFound
 	}
+	var path, mime, remote string
+	err := db.Db().QueryRowContext(ctx, `SELECT path, mime_type, url FROM music_cover WHERE id = $1`, artID.ID).Scan(&path, &mime, &remote)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrUnavailable
+	}
+	if err != nil {
+		return nil, err
+	}
+	if path != "" {
+		if _, err := filedelivery.AccelPath(path); err != nil {
+			return nil, err
+		}
+		return &Image{ReadCloser: io.NopCloser(strings.NewReader("")), Path: path, MIME: mime}, nil
+	}
+	if remote == "" {
+		return nil, ErrUnavailable
+	}
+	data, mime, err := filedelivery.RemoteImage(ctx, remote)
+	if err != nil {
+		return nil, err
+	}
+	return &Image{ReadCloser: io.NopCloser(bytes.NewReader(data)), MIME: mime}, nil
 }
 
 func (s *service) serveEntity(ctx context.Context, artID model.ArtworkID, size int, square bool) (*Image, error) {

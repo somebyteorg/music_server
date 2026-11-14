@@ -2,13 +2,9 @@ package jellyfin
 
 import (
 	"cmp"
-	"fmt"
-	"math"
-	"mime"
 	"net/http"
 	"net/url"
 	"slices"
-	"strconv"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -42,14 +38,18 @@ func (api *Router) mediaFileForRequest(w http.ResponseWriter, r *http.Request) (
 	return mf, true
 }
 
-// getPlaybackInfo answers /Items/{itemId}/PlaybackInfo with a single MediaSource for direct
-// playback. Format negotiation happens later in streamAudio (like Subsonic defers it to /stream).
+// getPlaybackInfo describes the same preferred original file used by direct playback.
 func (api *Router) getPlaybackInfo(w http.ResponseWriter, r *http.Request) {
 	mf, ok := api.mediaFileForRequest(w, r)
 	if !ok {
 		return
 	}
-	src := dto.MediaSourceFromMediaFile(*mf)
+	selected, err := stream.CommunityMedia(r.Context(), mf)
+	if err != nil {
+		api.internalError(w, r, err)
+		return
+	}
+	src := dto.MediaSourceFromMediaFile(*selected)
 	// The mapper only sees embedded lyrics; per-track we can afford the full pipeline
 	// (sidecars, plugins) so Finamp's Lyric-stream gate reflects every source.
 	if !slices.ContainsFunc(src.MediaStreams, func(s dto.MediaStream) bool { return s.Type == "Lyric" }) {
@@ -62,8 +62,7 @@ func (api *Router) getPlaybackInfo(w http.ResponseWriter, r *http.Request) {
 	// Self-authenticating: native players fetch this without an auth header. Server-relative:
 	// clients append it to a base URL already carrying /jellyfin.
 	if token := tokenFromRequest(r); token != "" {
-		src.TranscodingSubProtocol = "http"
-		src.TranscodingUrl = "/Audio/" + src.Id + "/universal?static=true&api_key=" + url.QueryEscape(token)
+		src.DirectStreamUrl = "/Audio/" + src.Id + "/universal?static=true&api_key=" + url.QueryEscape(token)
 	}
 	api.ok(w, r, dto.PlaybackInfoResponse{MediaSources: []dto.MediaSourceInfo{src}, PlaySessionId: dto.EncodeID(mf.ID)})
 }
@@ -140,14 +139,6 @@ func (api *Router) serveAudio(w http.ResponseWriter, r *http.Request, mf *model.
 
 func (api *Router) serveStream(w http.ResponseWriter, r *http.Request, mf *model.MediaFile, streamReq stream.Request) {
 	ctx := r.Context()
-	// A probe must not start a transcode. Omitting Content-Length is what tells a client (Fintunes)
-	// this is not direct play; direct play falls through to Serve, which answers HEAD itself.
-	if r.Method == http.MethodHead && streamReq.Format != "" && streamReq.Format != "raw" {
-		w.Header().Set("Content-Type", mime.TypeByExtension("."+streamReq.Format))
-		w.Header().Set("Accept-Ranges", "none")
-		w.WriteHeader(http.StatusOK)
-		return
-	}
 	s, err := api.streamer.NewStream(ctx, mf, streamReq)
 	if err != nil {
 		api.internalError(w, r, err)
@@ -159,50 +150,9 @@ func (api *Router) serveStream(w http.ResponseWriter, r *http.Request, mf *model
 	}
 }
 
-// streamHls serves /Audio/{itemId}/main.m3u8 (Finamp's transcoding mode) as a single-segment VOD
-// playlist whose one segment is the progressive transcode endpoint, reusing that whole pipeline.
-// Trade-off: seeking re-reads from the start, like Subsonic transcoded streams.
+// streamHls refuses HLS conversion; clients must use the original-file stream.
 func (api *Router) streamHls(w http.ResponseWriter, r *http.Request) {
-	mf, ok := api.mediaFileForRequest(w, r)
-	if !ok {
-		return
-	}
-	p := req.Params(r)
-
-	// HLS packed audio can only carry ADTS/AAC or MP3; other codecs fall back to aac. A forced
-	// transcoding wins verbatim — its override rewrites the segment anyway, and the playlist must match.
-	codec := strings.ToLower(p.StringOr("audiocodec", ""))
-	if codec != "mp3" {
-		codec = "aac"
-	}
-	if trc, ok := request.TranscodingFrom(r.Context()); ok && trc.TargetFormat != "" {
-		codec = strings.ToLower(trc.TargetFormat)
-	}
-
-	// Relative to the playlist URL. HLS fetches drop auth headers, so the token rides in the query.
-	segment := "stream." + codec
-	q := url.Values{}
-	if token := tokenFromRequest(r); token != "" {
-		q.Set("api_key", token)
-	}
-	if bitRate := p.IntOr("audiobitrate", 0); bitRate > 0 {
-		q.Set("audioBitRate", strconv.Itoa(bitRate))
-	}
-	if len(q) > 0 {
-		segment += "?" + q.Encode()
-	}
-
-	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
-	//nolint:gosec // not HTML; the only tainted value is query-escaped
-	fmt.Fprintf(w, "#EXTM3U\n"+
-		"#EXT-X-VERSION:3\n"+
-		"#EXT-X-PLAYLIST-TYPE:VOD\n"+
-		"#EXT-X-TARGETDURATION:%d\n"+
-		"#EXT-X-MEDIA-SEQUENCE:0\n"+
-		"#EXTINF:%.3f,\n"+
-		"%s\n"+
-		"#EXT-X-ENDLIST\n",
-		int(math.Ceil(float64(mf.Duration))), mf.Duration, segment)
+	http.Error(w, "Transcoding is disabled; use direct playback", http.StatusNotAcceptable)
 }
 
 // streamFile serves /Items/{itemId}/File and /Download, Jellyfin's direct-file endpoints. Some

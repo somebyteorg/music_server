@@ -121,8 +121,8 @@ func libraryIdFilter(_ string, value any) Sqlizer {
 func (r sqlRepository) applyLibraryFilter(ctx context.Context, sq SelectBuilder, tableName ...string) SelectBuilder {
 	user := loggedUser(ctx)
 
-	// If the user is an admin, or the user ID is invalid (e.g., when no user is logged in), skip the library filter
-	if user.IsAdmin || user.ID == invalidUserId {
+	// Background tasks have no personal selection; authenticated users share the same filter.
+	if user.ID == invalidUserId || user.HasAllLibraryAccess() {
 		return sq
 	}
 

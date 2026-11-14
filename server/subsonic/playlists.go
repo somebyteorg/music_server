@@ -162,8 +162,8 @@ func buildOSPlaylist(ctx context.Context, p model.Playlist) *responses.OpenSubso
 			pls.ValidUntil = new(p.EvaluatedAt.Add(p.RefreshDelay()))
 		}
 	} else {
-		user, ok := request.UserFrom(ctx)
-		pls.Readonly = !ok || p.OwnerID != user.ID || !p.TracksEditable()
+		_, ok := request.UserFrom(ctx)
+		pls.Readonly = !ok || !p.CanEditTracks || !p.TracksEditable()
 	}
 
 	return &pls

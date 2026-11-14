@@ -83,11 +83,8 @@ export function createDecisionService(fetchFn) {
   }
 
   async function resolveStreamUrl(songId) {
-    const decision = await getDecision(songId)
-    if (!decision?.transcodeParams) {
-      return baseUrl(subsonic.streamUrl(songId))
-    }
-    return buildStreamUrl(songId, decision.transcodeParams)
+    // Playback always uses the original file; decisions only supply quality metadata.
+    return subsonic.streamUrl(songId)
   }
 
   function getCachedDecision(songId) {
