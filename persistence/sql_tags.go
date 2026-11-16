@@ -19,6 +19,24 @@ type dbTag struct {
 }
 type dbTags map[model.TagName][]dbTag
 
+// UnmarshalJSON also accepts the string-only tag format written by older syncs.
+// New rows use the object format so tag IDs remain available to indexed filters.
+func (t *dbTag) UnmarshalJSON(data []byte) error {
+	var value string
+	if err := json.Unmarshal(data, &value); err == nil {
+		t.Value = value
+		return nil
+	}
+
+	type tag dbTag
+	var parsed tag
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return err
+	}
+	*t = dbTag(parsed)
+	return nil
+}
+
 func unmarshalTags(data string) (model.Tags, error) {
 	var dbTags dbTags
 	err := json.Unmarshal([]byte(data), &dbTags)
