@@ -54,10 +54,11 @@ func (s *playlists) TracksRepository(ctx context.Context, playlistId string, ref
 }
 
 // savePlaylist creates a new playlist, assigning the owner from context.
-// Only Name, Comment, Public, and Rules are user-settable via the REST API.
+// Only Name, Comment, and Rules are user-settable on creation via the REST API.
 func (s *playlists) savePlaylist(ctx context.Context, pls *model.Playlist) (string, error) {
 	usr, _ := request.UserFrom(ctx)
 	pls.OwnerID = usr.ID
+	pls.Public = false
 	pls.ID = ""               // Force new creation
 	pls.Path = ""             // Server-managed (M3U file path)
 	pls.Sync = false          // Server-managed (M3U sync flag)
@@ -88,6 +89,9 @@ func (s *playlists) updatePlaylistEntity(ctx context.Context, id string, entity 
 	}
 
 	sent := sentFields(cols)
+	if sent("public") && entity.Public && !current.Public {
+		return model.ErrNotAuthorized
+	}
 
 	usr, _ := request.UserFrom(ctx)
 	ownerChanged := sent("ownerId") && entity.OwnerID != "" && entity.OwnerID != current.OwnerID

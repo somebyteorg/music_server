@@ -142,7 +142,7 @@ func (s *playlists) Create(ctx context.Context, playlistId string, name string, 
 				return model.ErrPlaylistNotEditable
 			}
 		} else {
-			pls = &model.Playlist{Name: name, Public: true}
+			pls = &model.Playlist{Name: name, Public: false}
 			pls.OwnerID = usr.ID
 		}
 		pls.Tracks = make(model.PlaylistTracks, 0, len(ids))
@@ -179,6 +179,9 @@ func (s *playlists) Update(ctx context.Context, playlistID string,
 		return err
 	}
 	if (name != nil && *name != pls.Name || comment != nil && *comment != pls.Comment || public != nil && *public != pls.Public) && !pls.CanEdit {
+		return model.ErrNotAuthorized
+	}
+	if public != nil && *public && !pls.Public {
 		return model.ErrNotAuthorized
 	}
 	if len(idsToAdd) > 0 || len(idxToRemove) > 0 {

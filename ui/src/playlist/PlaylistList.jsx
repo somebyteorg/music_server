@@ -109,7 +109,9 @@ export const ToggleField = ({ resource, source }) => {
       checked={record[source]}
       color="primary"
       onClick={handleClick}
-      disabled={!isWritable(record.ownerId)}
+      disabled={
+        !isWritable(record.ownerId) || (source === 'public' && !record.public)
+      }
     />
   )
 }
@@ -123,16 +125,7 @@ const PlaylistListBulkActions = (props) => {
   const classes = useStyles()
   return (
     <>
-      <ChangePublicStatusButton
-        public={true}
-        {...props}
-        className={classes.button}
-      />
-      <ChangePublicStatusButton
-        public={false}
-        {...props}
-        className={classes.button}
-      />
+      <ChangePublicStatusButton {...props} className={classes.button} />
       <BulkDeleteButton {...props} className={classes.button} />
     </>
   )

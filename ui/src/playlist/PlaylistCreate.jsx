@@ -3,7 +3,6 @@ import {
   Create,
   SimpleForm,
   TextInput,
-  BooleanInput,
   required,
   useTranslate,
   useRefresh,
@@ -31,10 +30,13 @@ const PlaylistCreate = (props) => {
 
   return (
     <Create title={<Title subTitle={title} />} {...props} onSuccess={onSuccess}>
-      <SimpleForm redirect="list" variant={'outlined'}>
+      <SimpleForm
+        redirect="list"
+        variant={'outlined'}
+        initialValues={{ public: false }}
+      >
         <TextInput source="name" validate={required()} />
         <TextInput multiline source="comment" />
-        <BooleanInput source="public" initialValue={true} />
       </SimpleForm>
     </Create>
   )

@@ -23,9 +23,7 @@ func (r *playlistRepository) withLock(ctx context.Context, id string, block func
 }
 
 func (r *playlistRepository) Put(ctx context.Context, playlist *model.Playlist, columns ...string) error {
-	return r.withTx(ctx, func(tx sqlRepository) error {
-		scoped := *r
-		scoped.sqlRepository = tx
+	persist := func(scoped *playlistRepository) error {
 		var before *model.Playlist
 		action := "created"
 		if playlist.ID != "" {
@@ -33,6 +31,10 @@ func (r *playlistRepository) Put(ctx context.Context, playlist *model.Playlist, 
 			before, err = scoped.Get(ctx, playlist.ID)
 			if err != nil {
 				return err
+			}
+			// Publishing is managed by music_api, including for server administrators.
+			if !before.Public && playlist.Public {
+				return model.ErrNotAuthorized
 			}
 			// Cover sources are managed by music_api.
 			playlist.CoverID = before.CoverID
@@ -46,6 +48,8 @@ func (r *playlistRepository) Put(ctx context.Context, playlist *model.Playlist, 
 			action = "updated"
 		} else {
 			playlist.OwnerID = loggedUser(ctx).ID
+			// All playlists created through the server start private, including imports.
+			playlist.Public = false
 			playlist.CoverID = nil
 			playlist.UploadedImage = ""
 		}
@@ -61,6 +65,14 @@ func (r *playlistRepository) Put(ctx context.Context, playlist *model.Playlist, 
 			return scoped.recordActivity(ctx, action, before, playlist)
 		}
 		return nil
+	}
+	if playlist.ID != "" {
+		return r.withLock(ctx, playlist.ID, persist)
+	}
+	return r.withTx(ctx, func(tx sqlRepository) error {
+		scoped := *r
+		scoped.sqlRepository = tx
+		return persist(&scoped)
 	})
 }
 
